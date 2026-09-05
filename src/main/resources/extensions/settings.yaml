@@ -18,6 +18,11 @@ spec:
           help: 公众平台的开发者密码
           validation: required
         - $formkit: text
+          name: baseUrl
+          label: 接口地址
+          help: 留空则直连微信官方接口 https://api.weixin.qq.com。若 Halo 服务器无固定公网 IP、无法满足微信 IP 白名单，可填入自建反向代理地址（如 https://wechat-proxy.example.com），插件会把用到的微信接口请求发往该地址再转发到微信。该地址必须反向代理 README「接口地址与反向代理」中列出的全部接口。
+          value: ""
+        - $formkit: text
           name: author
           label: 默认作者
           help: 同步到公众号时展示的作者名，留空则使用文章作者

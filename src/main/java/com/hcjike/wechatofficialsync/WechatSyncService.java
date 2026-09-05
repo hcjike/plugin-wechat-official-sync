@@ -44,13 +44,15 @@ public class WechatSyncService {
      * 执行一次完整的同步流程，成功后返回草稿 media_id。
      */
     public Mono<String> submit(SyncRequest request, WechatSetting setting) {
+        // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
+        String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
         return resolveExternalBaseUrl()
             .flatMap(baseUrl -> wechatMpClient.getAccessToken(setting)
-                .flatMap(token -> uploadCover(token, request.getCover(), baseUrl)
+                .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
                     .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
                         request.getTitle(), thumbMediaId))
-                    .flatMap(thumbMediaId -> transferImages(token, request.getContent(), baseUrl)
-                        .flatMap(content -> wechatMpClient.addDraft(token,
+                    .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
+                        .flatMap(content -> wechatMpClient.addDraft(apiBase, token,
                             buildArticle(request, setting, thumbMediaId, content))))));
     }
 
@@ -77,7 +79,7 @@ public class WechatSyncService {
      * {@code errcode=40007 invalid media_id}。因此这里不再吞掉错误、静默跳过封面，而是把
      * 「无封面 / 地址无法解析 / 下载失败 / 上传失败」的真实原因清晰抛出，便于用户定位。</p>
      */
-    private Mono<String> uploadCover(String token, String cover, String baseUrl) {
+    private Mono<String> uploadCover(String apiBase, String token, String cover, String baseUrl) {
         String url = resolveUrl(cover, baseUrl);
         if (url == null) {
             String reason = (cover == null || cover.isBlank())
@@ -91,7 +93,7 @@ public class WechatSyncService {
                 if (bytes == null || bytes.length == 0) {
                     return Mono.error(new WechatApiException("封面图下载内容为空「" + url + "」，请确认该地址可正常访问"));
                 }
-                return wechatMpClient.uploadPermanentImage(token, bytes, filenameFrom(url))
+                return wechatMpClient.uploadPermanentImage(apiBase, token, bytes, filenameFrom(url))
                     .onErrorMap(e -> !(e instanceof WechatApiException),
                         e -> new WechatApiException("封面图上传到微信失败「" + url + "」：" + e.getMessage()));
             });
@@ -100,7 +102,7 @@ public class WechatSyncService {
     /**
      * 将正文中的图片逐一转存到微信，并替换为微信返回的图片地址。
      */
-    private Mono<String> transferImages(String token, String html, String baseUrl) {
+    private Mono<String> transferImages(String apiBase, String token, String html, String baseUrl) {
         if (html == null || html.isBlank()) {
             return Mono.just(html == null ? "" : html);
         }
@@ -116,7 +118,7 @@ public class WechatSyncService {
                     return Mono.just(image);
                 }
                 return wechatMpClient.download(url)
-                    .flatMap(bytes -> wechatMpClient.uploadContentImage(token, bytes, filenameFrom(url)))
+                    .flatMap(bytes -> wechatMpClient.uploadContentImage(apiBase, token, bytes, filenameFrom(url)))
                     .doOnNext(newSrc -> image.attr("src", newSrc))
                     .thenReturn(image)
                     .onErrorResume(e -> {

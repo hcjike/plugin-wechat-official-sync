@@ -17,6 +17,12 @@ public class WechatSetting {
 
     private String appSecret;
 
+    /**
+     * 微信接口基址。留空则直连官方 {@code https://api.weixin.qq.com}；无固定公网 IP 时可填自建
+     * 反向代理地址（把代理服务器的固定 IP 加入微信白名单），插件会将用到的微信接口请求发往该地址。
+     */
+    private String baseUrl;
+
     private String author;
 
     private boolean openComment;

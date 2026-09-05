@@ -40,7 +40,8 @@ public class WechatMpClient {
 
     private static final Logger log = LoggerFactory.getLogger(WechatMpClient.class);
 
-    private static final String BASE_URL = "https://api.weixin.qq.com";
+    /** 微信官方接口默认地址；用户可在插件设置里改为自建反向代理地址。 */
+    private static final String DEFAULT_BASE_URL = "https://api.weixin.qq.com";
 
     /** 微信图片素材支持的格式，其余（如 webp）需转换后再上传。 */
     private static final Set<String> WECHAT_IMAGE_EXTS = Set.of("jpg", "jpeg", "png", "gif", "bmp");
@@ -61,6 +62,34 @@ public class WechatMpClient {
     }
 
     /**
+     * 解析微信接口基址。
+     *
+     * <p>留空则直连官方 {@value #DEFAULT_BASE_URL}；否则使用用户配置的地址——常见于用一台有
+     * <b>固定公网 IP</b> 的低配服务器做反向代理：把该 IP 加入微信「IP 白名单」，Halo 即便没有
+     * 固定公网 IP（动态 IP / 家用宽带 / NAT 之后），也能经代理稳定获取 access_token 并完成同步。
+     * 仅接受 http/https 绝对地址，统一去除尾部 '/'（允许带路径前缀，如
+     * {@code https://example.com/wechat-proxy}）；非法时告警并回退默认地址。</p>
+     *
+     * @param configured 用户在插件设置中填写的接口地址，可为空
+     * @return 规范化后的接口基址（不含尾部 '/'）
+     */
+    public static String resolveApiBase(String configured) {
+        if (configured == null || configured.isBlank()) {
+            return DEFAULT_BASE_URL;
+        }
+        String trimmed = configured.trim();
+        if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) {
+            log.warn("接口地址「{}」不是合法的 http/https 绝对地址，回退到默认 {}", trimmed, DEFAULT_BASE_URL);
+            return DEFAULT_BASE_URL;
+        }
+        int end = trimmed.length();
+        while (end > 0 && trimmed.charAt(end - 1) == '/') {
+            end--;
+        }
+        return trimmed.substring(0, end);
+    }
+
+    /**
      * 获取（并缓存）公众号全局 access_token。
      */
     public Mono<String> getAccessToken(WechatSetting setting) {
@@ -72,8 +101,9 @@ public class WechatMpClient {
         if (cache != null && cache.appId().equals(setting.getAppId()) && cache.expireAt() > now) {
             return Mono.just(cache.token());
         }
+        String apiBase = resolveApiBase(setting.getBaseUrl());
         return webClient.get()
-            .uri(BASE_URL + "/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}",
+            .uri(apiBase + "/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}",
                 setting.getAppId(), setting.getAppSecret())
             .retrieve()
             .bodyToMono(String.class)
@@ -104,8 +134,8 @@ public class WechatMpClient {
     /**
      * 上传正文图片（uploadimg），返回微信域名下的图片 URL。
      */
-    public Mono<String> uploadContentImage(String token, byte[] data, String filename) {
-        return postMultipart(BASE_URL + "/cgi-bin/media/uploadimg?access_token={token}", token, data, filename)
+    public Mono<String> uploadContentImage(String apiBase, String token, byte[] data, String filename) {
+        return postMultipart(apiBase + "/cgi-bin/media/uploadimg?access_token={token}", token, data, filename)
             .flatMap(body -> {
                 Object url = body.get("url");
                 if (url != null) {
@@ -118,8 +148,8 @@ public class WechatMpClient {
     /**
      * 上传永久图片素材（add_material），返回可用于草稿封面的 media_id。
      */
-    public Mono<String> uploadPermanentImage(String token, byte[] data, String filename) {
-        return postMultipart(BASE_URL + "/cgi-bin/material/add_material?access_token={token}&type=image",
+    public Mono<String> uploadPermanentImage(String apiBase, String token, byte[] data, String filename) {
+        return postMultipart(apiBase + "/cgi-bin/material/add_material?access_token={token}&type=image",
                 token, data, filename)
             .flatMap(body -> {
                 Object mediaId = body.get("media_id");
@@ -133,9 +163,9 @@ public class WechatMpClient {
     /**
      * 新建图文草稿，返回草稿 media_id。
      */
-    public Mono<String> addDraft(String token, Map<String, Object> article) {
+    public Mono<String> addDraft(String apiBase, String token, Map<String, Object> article) {
         return webClient.post()
-            .uri(BASE_URL + "/cgi-bin/draft/add?access_token={token}", token)
+            .uri(apiBase + "/cgi-bin/draft/add?access_token={token}", token)
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(Map.of("articles", List.of(article)))
             .retrieve()

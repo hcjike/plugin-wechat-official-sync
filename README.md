@@ -61,13 +61,78 @@
 | --- | --- | --- |
 | AppID | 是 | 公众平台「设置与开发 - 基本配置」中的开发者 ID |
 | AppSecret | 是 | 公众平台的开发者密码（以密文存储） |
+| 接口地址 | 否 | 微信接口基址。留空则直连官方 `https://api.weixin.qq.com`；无固定公网 IP 时填自建反向代理地址，详见[接口地址与反向代理](#接口地址与反向代理) |
 | 默认作者 | 否 | 同步到公众号时展示的作者名，留空则使用文章作者 |
 | 开启评论 | 否 | 同步生成的草稿是否开启评论，默认关闭 |
 
 ### 还需要在微信公众平台 / Halo 侧完成的准备
 
-- **IP 白名单**：在公众平台「基本配置 - IP 白名单」中加入 **Halo 服务器的公网出口 IP**，否则无法获取 `access_token`。
+- **IP 白名单**：在公众平台「基本配置 - IP 白名单」中加入 **Halo 服务器的公网出口 IP**，否则无法获取 `access_token`。若 Halo 服务器**没有固定公网 IP**（动态 IP、家用宽带、部署在 NAT 之后），请改用[接口地址与反向代理](#接口地址与反向代理)方案：用一台有固定公网 IP 的服务器做反向代理，把**该代理服务器的固定 IP** 加入白名单。
 - **外部访问地址**：若文章封面或正文图片使用**相对路径**，需在 Halo「设置 - 基本设置 - 外部访问地址」中配置可公网访问的站点地址，插件据此拼接出图片的绝对地址后再下载转存（会自动兼容地址尾部有无 `/`）。
+
+### 接口地址与反向代理
+
+微信要求**获取 `access_token` 的服务器出口 IP** 必须在公众号「IP 白名单」中。若你的 Halo 服务器**没有固定公网 IP**（动态 IP、家用宽带、部署在 NAT 之后等），白名单会频繁失效，导致同步失败。
+
+解决办法：准备一台**有固定公网 IP** 的低配服务器（VPS）作为**反向代理 / 白名单代理**，只把**这台代理服务器的固定 IP** 加入微信 IP 白名单。Halo 将微信接口请求发往「接口地址」，由代理转发到 `api.weixin.qq.com`——微信看到的出口 IP 始终是代理的固定 IP，从而绕开 Halo 无固定公网 IP 的限制。
+
+```
+Halo 服务器（无固定公网 IP）
+        │  请求发往插件设置的「接口地址」
+        ▼
+反向代理服务器（固定公网 IP，已加入微信 IP 白名单）
+        │  原样转发到
+        ▼
+https://api.weixin.qq.com
+```
+
+**配置**：在插件设置的 **接口地址** 中填入代理服务器地址（如 `https://wechat-proxy.example.com`）；留空则直连微信官方接口。地址支持带路径前缀（如 `https://example.com/wechat-proxy`），插件会保留前缀并去除尾部 `/`。
+
+> ⚠️ 你**必须**在该地址上反向代理插件用到的**全部**微信接口，并**保持原始请求路径不变**，否则相应步骤会失败。
+
+**插件用到的微信接口**（相对于「接口地址」基址，均为微信官方路径）：
+
+| 方法 | 路径 | 用途 | 请求体 |
+| --- | --- | --- | --- |
+| `GET` | `/cgi-bin/token` | 获取 `access_token` | 查询参数 |
+| `POST` | `/cgi-bin/media/uploadimg` | 上传正文图片 | `multipart/form-data` |
+| `POST` | `/cgi-bin/material/add_material?type=image` | 上传封面为永久图片素材 | `multipart/form-data` |
+| `POST` | `/cgi-bin/draft/add` | 创建图文草稿 | `application/json` |
+
+**Nginx 反向代理示例**（部署在代理服务器上，将上述路径整体转发到微信）：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name wechat-proxy.example.com;
+
+    # ssl_certificate     /path/to/fullchain.pem;
+    # ssl_certificate_key /path/to/privkey.pem;
+
+    # 仅放行插件用到的 4 个接口路径，其余一律拒绝，避免沦为开放代理
+    location ~ ^/cgi-bin/(token|media/uploadimg|material/add_material|draft/add)$ {
+        proxy_pass https://api.weixin.qq.com;   # 不含 URI，nginx 会原样透传路径与查询参数
+        proxy_set_header Host api.weixin.qq.com;
+        proxy_ssl_server_name on;               # 关键：向微信发起 TLS 时携带 SNI
+        proxy_ssl_name api.weixin.qq.com;
+
+        client_max_body_size 20m;               # 素材上传可能较大，按需调整
+        proxy_request_buffering off;
+        proxy_read_timeout 60s;
+    }
+
+    location / {
+        return 403;
+    }
+}
+```
+
+要点：
+- `proxy_pass` 到 `https://` 上游时务必开启 `proxy_ssl_server_name on;`（SNI），否则与微信的 TLS 握手可能失败。
+- **保持路径原样转发**：`proxy_pass` 后不要带会改写路径的 URI 部分，让 nginx 原样透传 `/cgi-bin/...` 路径与查询参数。
+- 代理服务器的**出口 IP** 必须与加入微信白名单的 IP 一致。
+- 建议用 `location` 精确匹配上面 4 个路径、拒绝其它请求，防止代理被滥用。
+- 生产环境请为代理配置 `https://` 与合法证书；仅内网测试时可用 `http://`。
 
 ## 权限说明
 
@@ -104,6 +169,7 @@
 
 - 同步状态持久化在名为 `wechat-official-sync-records` 的 ConfigMap 中，供文章列表渲染状态列。
 - `access_token` 带内存缓存并在到期前自动刷新，避免频繁请求。
+- 所有微信接口请求都发往设置的 **接口地址**（留空为官方 `https://api.weixin.qq.com`），便于经自建反向代理转发。
 
 ## 接口
 
@@ -166,6 +232,9 @@ pnpm dev
 
 **Q：提示获取 `access_token` 失败？**
 检查 AppID / AppSecret 是否正确，以及是否已在公众平台配置 **IP 白名单**（Halo 服务器公网出口 IP）。
+
+**Q：Halo 服务器没有固定公网 IP，白名单总是失效怎么办？**
+用一台有固定公网 IP 的服务器做反向代理，把**代理服务器的 IP** 加入微信白名单，并在插件「接口地址」中填入代理地址。详见[接口地址与反向代理](#接口地址与反向代理)。
 
 **Q：提示接口无权限 / 48001 等错误？**
 草稿箱、素材管理等接口需要**已认证**的公众号并开通对应权限，未认证或个人订阅号可能无法调用。
