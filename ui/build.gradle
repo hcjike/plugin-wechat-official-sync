@@ -5,6 +5,12 @@ plugins {
 
 group 'com.hcjike.wechatofficialsync.ui'
 
+node {
+    version = '24.20.0'           // Node 版本，按你项目需要调整
+    pnpmVersion = '10.33.0'       // 和项目 package.json 锁的版本一致
+    download = true
+}
+
 tasks.register('pnpmBuild', PnpmTask) {
     group = 'build'
     description = 'Build the UI project using pnpm'

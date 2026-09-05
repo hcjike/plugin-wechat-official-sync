@@ -1,6 +1,12 @@
 pluginManagement {
     repositories {
+        // 国内镜像：gradle-plugin 代理 Plugin Portal（run.halo.plugin.devtools 等），
+        // central 直连镜像 Maven Central（io.freefair.lombok 等）；两者缺一不可，gradle.org/Central 在国内常超时
+        maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+        maven { url 'https://maven.aliyun.com/repository/central' }
+        maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public' }
         gradlePluginPortal()
+        mavenCentral()
     }
 }
 rootProject.name = 'plugin-wechat-official-sync'
