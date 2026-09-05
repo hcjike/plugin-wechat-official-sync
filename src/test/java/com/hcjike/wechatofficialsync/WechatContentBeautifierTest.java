@@ -123,6 +123,39 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void tableIsWrappedInHorizontalScrollContainer() {
+        String html = "<table><tr><th>列</th></tr><tr><td>值</td></tr></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 表格外层包一个横向滚动的 section 容器（文章设定宽度超屏时可滚动）
+        assertThat(result).contains("<section style=\"margin:1em 0;overflow-x:auto;");
+        // 表格本体不强制宽度（无 min-width），也不在 table 自身上 display:block
+        assertThat(result).doesNotContain("min-width:100%");
+        assertThat(result).doesNotContain("display:block;");
+        // 单元格内容允许自动换行，不再强制 white-space:nowrap
+        assertThat(result).doesNotContain("white-space:nowrap");
+        // 固定布局：列宽按文章 <colgroup> 设定渲染，列宽之和超屏时整体溢出→横向滚动
+        assertThat(result).contains("table-layout:fixed");
+        // 长 token 在列内折断、不遮挡相邻列（不用 anywhere 避免塌缩宽度丢失滚动）
+        assertThat(result).contains("overflow-wrap:break-word");
+        assertThat(result).doesNotContain("overflow-wrap:anywhere");
+        // th/td 仍按标签名注入样式
+        assertThat(result).contains("background:#f6f8fa");
+        assertThat(result).contains("border:1px solid #dfe2e5");
+    }
+
+    @Test
+    void tableKeepsWidthSetInArticle() {
+        // 文章（用户）已设定的 width 应保留为准（默认样式在前、原有内联在后，后者胜出）
+        String html = "<table style=\"width:600px;\"><tr><td>值</td></tr></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("width:600px;");
+        // 默认样式不注入任何 width，避免覆盖文章设定
+        assertThat(result).doesNotContain("min-width");
+    }
+
+    @Test
     void customThemeColorIsAppliedToBlockquote() {
         BeautifySetting cfg = new BeautifySetting();
         cfg.setThemeColor("#ff5500");

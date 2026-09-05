@@ -93,11 +93,32 @@ final class WechatContentBeautifier {
     private static final String IMG_STYLE =
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
 
+    /**
+     * 表格外层横向滚动容器：表格宽度以文章中设置的为准，若该宽度超出微信移动端屏宽，
+     * 容器 {@code overflow-x:auto} 让表格可横向滚动查看全貌，与代码块的横向拖拽观感一致。
+     */
+    private static final String TABLE_SCROLL_WRAPPER =
+        "margin:1em 0;overflow-x:auto;-webkit-overflow-scrolling:touch;";
+
+    /**
+     * 表格本体：<b>不强制总宽度</b>，以文章中设置的为准（用户内联 {@code width} 因「默认在前、原有在后」
+     * 而优先生效，见 {@link #applyStyle}）。关键是补回 {@code table-layout:fixed}：Halo/TipTap 编辑器表格
+     * 本依赖它（来自样式表）但被微信剥离；固定布局下列宽严格按文章 {@code <colgroup>} 设定的每列宽度渲染，
+     * 单元格内容在列宽内自动换行；当各列宽之和超出屏幕时表格整体溢出，由外层容器横向滚动。
+     */
     private static final String TABLE_STYLE =
-        "border-collapse:collapse;width:100%;margin:1em 0;font-size:15px;overflow-x:auto;display:block;";
+        "border-collapse:collapse;font-size:15px;table-layout:fixed;";
+
+    /**
+     * 单元格换行策略：固定布局下列宽已由 {@code <colgroup>} 确定，内容自然在列内换行；仅需
+     * {@code overflow-wrap:break-word} 折断超长 token（如 URL）防止其溢出列宽、遮挡相邻列。
+     * <b>不用 {@code overflow-wrap:anywhere}</b>：它会塌缩最小内容宽度，在自动布局下把表格压成满宽、丢失横向滚动。
+     */
+    private static final String CELL_WRAP = "word-break:break-word;overflow-wrap:break-word;";
 
     private static final String TH_STYLE =
-        "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;background:#f6f8fa;font-weight:bold;color:#333333;";
+        "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;background:#f6f8fa;font-weight:bold;"
+            + "color:#333333;" + CELL_WRAP;
 
     private static final String HR_STYLE = "border:none;border-top:1px solid #eaeaea;margin:1.6em 0;";
 
@@ -128,6 +149,8 @@ final class WechatContentBeautifier {
         sanitize(body);
         // 代码块重建须在通用样式注入前：重建后 <pre> 已不存在，剩余 <code> 即行内代码
         buildCodeBlocks(body, cfg);
+        // 表格包裹须在通用样式注入前：外层滚动容器就位后，table/th/td 样式仍按标签名注入
+        buildTables(body);
         injectStyles(body, cfg);
         wrapWithBase(body, cfg);
         return body.html();
@@ -235,6 +258,22 @@ final class WechatContentBeautifier {
     }
 
     /**
+     * 把每个 {@code <table>} 包进一个横向滚动的 {@code <section>} 容器。
+     *
+     * <p>表格 {@code table-layout:fixed}（见 {@link #TABLE_STYLE}）使列宽严格按文章设定的每列宽度渲染、
+     * 单元格内容在列内自动换行；当各列宽之和超出屏幕时，表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动
+     * 查看全貌。table 的 th/td 样式仍由 {@link #injectStyles} 按标签名注入，故此方法只负责包裹结构。</p>
+     */
+    private static void buildTables(Element body) {
+        for (Element table : body.select("table")) {
+            Element wrapper = new Element(Tag.valueOf("section"), "");
+            wrapper.attr("style", TABLE_SCROLL_WRAPPER);
+            table.before(wrapper);
+            wrapper.appendChild(table);
+        }
+    }
+
+    /**
      * 取出 {@code <pre>} 的纯文本并按行拆分：先归一换行符，再剥掉渲染器常引入的首/尾空行；
      * 空代码块至少返回一个空行，保证结构完整。
      */
@@ -293,7 +332,7 @@ final class WechatContentBeautifier {
     }
 
     private static String tdStyle(String textColor) {
-        return "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;color:" + textColor + ";";
+        return "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;color:" + textColor + ";" + CELL_WRAP;
     }
 
     private static String aStyle(String linkColor) {
