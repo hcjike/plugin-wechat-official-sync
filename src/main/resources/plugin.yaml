@@ -1,0 +1,24 @@
+# Refer https://docs.halo.run/developer-guide/plugin/basics/manifest
+
+apiVersion: plugin.halo.run/v1alpha1
+kind: Plugin
+metadata:
+  # The name defines how the plugin is invoked, A unique name
+  name: plugin-wechat-official-sync
+spec:
+  enabled: true
+  requires: ">=2.26.0"
+  author:
+    name: 宏尘极客
+    website: https://www.hcjike.com
+  logo: wechat.png
+  settingName: plugin-wechat-official-sync-settings
+  configMapName: plugin-wechat-official-sync-configmap
+  homepage: https://github.com/hcjike/plugin-wechat-official-sync#readme
+  repo: https://github.com/hcjike/plugin-wechat-official-sync
+  issues: https://github.com/hcjike/plugin-wechat-official-sync/issues
+  displayName: "微信公众号同步"
+  description: "在文章列表操作中一键将文章同步到微信公众号草稿箱"
+  license:
+    - name: "GPL-3.0"
+      url: "https://github.com/hcjike/plugin-wechat-official-sync/blob/main/LICENSE"

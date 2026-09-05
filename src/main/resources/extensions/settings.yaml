@@ -1,0 +1,29 @@
+apiVersion: v1alpha1
+kind: Setting
+metadata:
+  name: plugin-wechat-official-sync-settings
+spec:
+  forms:
+    - group: wechat
+      label: 微信公众号
+      formSchema:
+        - $formkit: text
+          name: appId
+          label: AppID
+          help: 公众平台「设置与开发 - 基本配置」中的开发者 ID
+          validation: required
+        - $formkit: password
+          name: appSecret
+          label: AppSecret
+          help: 公众平台的开发者密码
+          validation: required
+        - $formkit: text
+          name: author
+          label: 默认作者
+          help: 同步到公众号时展示的作者名，留空则使用文章作者
+          value: ""
+        - $formkit: checkbox
+          name: openComment
+          label: 开启评论
+          help: 同步生成的草稿是否开启评论
+          value: false

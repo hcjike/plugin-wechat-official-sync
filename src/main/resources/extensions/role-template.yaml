@@ -1,0 +1,26 @@
+apiVersion: v1alpha1
+kind: Role
+metadata:
+  # 以插件名 plugin-wechat-official-sync 作为前缀，避免与其他插件冲突
+  name: plugin-wechat-official-sync-role-publish
+  labels:
+    # 标识为角色模板，启用插件后会出现在「角色 - 权限」列表中供分配
+    halo.run/role-template: "true"
+  annotations:
+    # 在权限列表中归组展示
+    rbac.authorization.halo.run/module: "微信公众号同步"
+    # 权限的友好显示名称
+    rbac.authorization.halo.run/display-name: "发布到微信公众号"
+    # UI 权限：前端据此控制「同步到微信公众号」操作项是否展示
+    rbac.authorization.halo.run/ui-permissions: |
+      ["plugin:plugin-wechat-official-sync:post:sync"]
+# Role 的 rules 是顶层字段（与 metadata 同级），不是 spec.rules；Role 无 spec/displayName 字段，显示名用上面的 display-name 注解
+rules:
+  # 提交同步任务：POST /apis/api.wechat-sync.halo.run/v1alpha1/sync
+  - apiGroups: ["api.wechat-sync.halo.run"]
+    resources: ["sync"]
+    verbs: ["create"]
+  # 查询同步状态：GET /apis/api.wechat-sync.halo.run/v1alpha1/status
+  - apiGroups: ["api.wechat-sync.halo.run"]
+    resources: ["status"]
+    verbs: ["list"]
