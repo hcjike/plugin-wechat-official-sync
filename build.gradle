@@ -7,9 +7,6 @@ plugins {
 group 'com.hcjike.wechatofficialsync'
 
 repositories {
-    // 国内镜像优先（aliyun central 直连镜像 Maven Central）；保留 mavenCentral() 兜底
-    maven { url 'https://maven.aliyun.com/repository/central' }
-    maven { url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public' }
     mavenCentral()
 }
 
