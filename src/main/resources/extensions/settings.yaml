@@ -27,8 +27,134 @@ spec:
           label: 默认作者
           help: 同步到公众号时展示的作者名，留空则使用文章作者
           value: ""
-        - $formkit: checkbox
+        - $formkit: switch
+          onValue: true
+          offValue: false
           name: openComment
+          id: openComment
           label: 开启评论
-          help: 同步生成的草稿是否开启评论
           value: false
+          help: 同步生成的草稿是否开启评论
+    - group: beautify
+      label: 正文美化
+      formSchema:
+        - $formkit: color
+          name: textColor
+          label: 正文文字颜色
+          help: 段落、列表、表格正文的文字颜色
+          value: "#3f3f3f"
+          validation: required
+        - $formkit: color
+          name: linkColor
+          label: 链接颜色
+          help: 正文中超链接的文字颜色
+          value: "#576b95"
+          validation: required
+        - $formkit: color
+          name: inlineCodeColor
+          label: 行内代码颜色
+          help: 行内 code 的文字颜色（默认对齐微信图文经典风格）
+          value: "#d14"
+          validation: required
+        - $formkit: color
+          name: inlineCodeBgColor
+          label: 行内代码底色
+          help: 行内 code 的背景色
+          value: "#f2f3f5"
+          validation: required
+        - $formkit: radio
+          name: codeBlockTheme
+          label: 代码块主题
+          help: 代码块配色；两种风格均对齐微信原生，长行发布后支持横向拖拽
+          value: light
+          validation: required
+          options:
+            - label: 浅色（微信原生）
+              value: light
+            - label: 深色
+              value: dark
+        - $formkit: color
+          name: themeColor
+          label: 引用块边框颜色
+          help: 引用块左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+        - $formkit: switch
+          onValue: true
+          offValue: false
+          name: headingBorderEnabled
+          id: headingBorderEnabled
+          label: 标题显示边框
+          value: false
+          help: 开启后 H2–H6 标题显示左侧强调边框（H1 居中不加边框），各级边框色随之显示
+        - $formkit: color
+          name: h1Color
+          label: 一级标题颜色
+          help: H1 标题文字颜色
+          value: "#222222"
+          validation: required
+        - $formkit: color
+          name: h2Color
+          label: 二级标题颜色
+          help: H2 标题文字颜色
+          value: "#222222"
+          validation: required
+        - $formkit: color
+          name: h2BorderColor
+          label: 二级标题边框颜色
+          help: H2 标题左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+          if: $get(headingBorderEnabled).value
+        - $formkit: color
+          name: h3Color
+          label: 三级标题颜色
+          help: H3 标题文字颜色
+          value: "#222222"
+          validation: required
+        - $formkit: color
+          name: h3BorderColor
+          label: 三级标题边框颜色
+          help: H3 标题左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+          if: $get(headingBorderEnabled).value
+        - $formkit: color
+          name: h4Color
+          label: 四级标题颜色
+          help: H4 标题文字颜色
+          value: "#222222"
+          validation: required
+        - $formkit: color
+          name: h4BorderColor
+          label: 四级标题边框颜色
+          help: H4 标题左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+          if: $get(headingBorderEnabled).value
+        - $formkit: color
+          name: h5Color
+          label: 五级标题颜色
+          help: H5 标题文字颜色
+          value: "#333333"
+          validation: required
+        - $formkit: color
+          name: h5BorderColor
+          label: 五级标题边框颜色
+          help: H5 标题左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+          if: $get(headingBorderEnabled).value
+        - $formkit: color
+          name: h6Color
+          label: 六级标题颜色
+          help: H6 标题文字颜色
+          value: "#888888"
+          validation: required
+        - $formkit: color
+          name: h6BorderColor
+          label: 六级标题边框颜色
+          help: H6 标题左侧强调边框的颜色
+          value: "#07c160"
+          validation: required
+          if: $get(headingBorderEnabled).value

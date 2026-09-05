@@ -43,8 +43,12 @@ public class WechatSyncService {
 
     /**
      * 执行一次完整的同步流程，成功后返回草稿 media_id。
+     *
+     * @param request  同步请求（文章标题/正文/封面等）
+     * @param setting  公众号凭据与基本配置
+     * @param beautify 正文美化配置（独立设置分组，缺省时用内置默认值）
      */
-    public Mono<String> submit(SyncRequest request, WechatSetting setting) {
+    public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify) {
         // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
         String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
         return resolveExternalBaseUrl()
@@ -53,7 +57,7 @@ public class WechatSyncService {
                     .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
                         request.getTitle(), thumbMediaId))
                     .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
-                        .flatMap(content -> beautifyContent(content)
+                        .flatMap(content -> beautifyContent(content, beautify)
                             .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
                                 buildArticle(request, setting, thumbMediaId, beautified)))))));
     }
@@ -61,11 +65,12 @@ public class WechatSyncService {
     /**
      * 美化正文：为常见标签注入微信友好的内联样式（微信会剥离 class 与外部 CSS，只保留行内 style）。
      *
-     * <p>jsoup 解析与 DOM 改写属 CPU 操作，切到 {@link Schedulers#boundedElastic()} 执行，避免占用
-     * Netty 事件循环线程；具体样式规则见 {@link WechatContentBeautifier}。</p>
+     * <p>按 {@link BeautifySetting} 的主题色、代码块主题与 H1–H6 颜色生成样式。jsoup 解析与 DOM 改写
+     * 属 CPU 操作，切到 {@link Schedulers#boundedElastic()} 执行，避免占用 Netty 事件循环线程；规则见
+     * {@link WechatContentBeautifier}。</p>
      */
-    private Mono<String> beautifyContent(String content) {
-        return Mono.fromCallable(() -> WechatContentBeautifier.beautify(content))
+    private Mono<String> beautifyContent(String content, BeautifySetting beautify) {
+        return Mono.fromCallable(() -> WechatContentBeautifier.beautify(content, beautify))
             .subscribeOn(Schedulers.boundedElastic());
     }
 

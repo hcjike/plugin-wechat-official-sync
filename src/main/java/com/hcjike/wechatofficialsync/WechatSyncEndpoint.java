@@ -55,13 +55,17 @@ public class WechatSyncEndpoint implements CustomEndpoint {
                 String postName = body.getPostName() == null ? "" : body.getPostName();
                 log.info("收到同步请求：文章《{}》，postName={}", body.getTitle(), postName);
                 return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
-                    .flatMap(setting -> recordStore.save(postName, SyncRecord.pending())
-                        // 先落库「同步中」，再异步执行，接口立即返回，不阻塞 Console 请求
-                        .then(Mono.fromRunnable(() -> startAsync(body, setting)))
-                        .then(ServerResponse.accepted()
-                            .bodyValue(Map.of(
-                                "message", "同步任务已提交",
-                                "postName", postName))))
+                    .flatMap(setting -> settingFetcher
+                        .fetch(BeautifySetting.GROUP, BeautifySetting.class)
+                        // 未配置「正文美化」分组时用内置默认值，保证美化不中断
+                        .defaultIfEmpty(new BeautifySetting())
+                        .flatMap(beautify -> recordStore.save(postName, SyncRecord.pending())
+                            // 先落库「同步中」，再异步执行，接口立即返回，不阻塞 Console 请求
+                            .then(Mono.fromRunnable(() -> startAsync(body, setting, beautify)))
+                            .then(ServerResponse.accepted()
+                                .bodyValue(Map.of(
+                                    "message", "同步任务已提交",
+                                    "postName", postName)))))
                     .switchIfEmpty(Mono.defer(() -> {
                         log.warn("文章《{}》同步被拒绝：插件尚未配置微信公众号信息", body.getTitle());
                         return recordStore
@@ -84,9 +88,9 @@ public class WechatSyncEndpoint implements CustomEndpoint {
     /**
      * 在后台线程执行同步，并将最终结果（成功/失败）写回状态存储。
      */
-    private void startAsync(SyncRequest body, WechatSetting setting) {
+    private void startAsync(SyncRequest body, WechatSetting setting, BeautifySetting beautify) {
         String postName = body.getPostName() == null ? "" : body.getPostName();
-        syncService.submit(body, setting)
+        syncService.submit(body, setting, beautify)
             .subscribeOn(Schedulers.boundedElastic())
             .subscribe(
                 mediaId -> {

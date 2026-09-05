@@ -1,7 +1,9 @@
 package com.hcjike.wechatofficialsync;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.regex.Pattern;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Document;
@@ -17,7 +19,7 @@ import org.jsoup.parser.Tag;
  * {@code class}/{@code id} 属性，<b>只保留元素上的内联 {@code style="..."} 属性</b>。而 Halo 正文靠主题
  * class + 外部 CSS 排版，直接塞进草稿会丢样式变成「裸 HTML」。本类按<b>标签名</b>为常见元素注入内联样式
  * （标题/段落/引用/代码块/图片自适应/列表/表格/链接等），对标 doocs/md 的默认排版效果。</p>
- *
+
  * <p>注入策略：我们的默认样式写在<b>前</b>、元素原有内联样式写在<b>后</b>。同一 {@code style} 属性内后出现的
  * 同名属性覆盖先出现的，故用户在编辑器里已设置的行内样式优先级更高，本类只补齐缺省样式，不覆盖用户意图。
  * 仅使用 jsoup（项目已有依赖），无阻塞 I/O，可安全在 boundedElastic 线程执行。</p>
@@ -27,67 +29,66 @@ import org.jsoup.parser.Tag;
  */
 final class WechatContentBeautifier {
 
-    /** 正文根节点的基础排版：字体、字号、行高、颜色，供所有未显式覆盖的后代继承。 */
-    private static final String BASE_STYLE =
-        "font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue','PingFang SC','Hiragino Sans GB',"
-            + "'Microsoft YaHei',Arial,sans-serif;"
-            + "font-size:16px;color:#3f3f3f;line-height:1.75;letter-spacing:0.4px;"
-            + "word-break:break-word;text-align:left;";
+    /** 未配置或非法时使用的内置默认正文文字色（根节点/段落/列表/表格正文共用）。 */
+    private static final String DEFAULT_TEXT_COLOR = "#3f3f3f";
 
-    private static final String H1_STYLE =
-        "font-size:22px;font-weight:bold;line-height:1.4;text-align:center;margin:1.4em 0 0.9em;color:#222222;";
+    /** 未配置或非法时使用的内置默认链接色。 */
+    private static final String DEFAULT_LINK_COLOR = "#576b95";
 
-    private static final String H2_STYLE =
-        "font-size:19px;font-weight:bold;line-height:1.4;margin:1.6em 0 0.9em;"
-            + "padding-left:12px;border-left:4px solid #07c160;color:#222222;";
+    /**
+     * 未配置或非法时使用的内置默认行内代码文字色。
+     *
+     * <p>对齐 doocs/md「经典」主题（即微信图文事实上的行内代码标准）的 {@code #d14}。</p>
+     */
+    private static final String DEFAULT_INLINE_CODE_COLOR = "#d14";
 
-    private static final String H3_STYLE =
-        "font-size:17px;font-weight:bold;line-height:1.4;margin:1.4em 0 0.7em;color:#222222;";
+    /**
+     * 未配置或非法时使用的内置默认行内代码底色。
+     *
+     * <p>doocs/md「经典」用 {@code rgba(27,31,35,.05)}，白底上视觉等价于 {@code #f2f3f5}；
+     * 因颜色选择器只支持十六进制，故用该 hex 作为可配默认值。</p>
+     */
+    private static final String DEFAULT_INLINE_CODE_BG_COLOR = "#f2f3f5";
 
-    private static final String H4_STYLE =
-        "font-size:16px;font-weight:bold;line-height:1.4;margin:1.2em 0 0.6em;color:#222222;";
+    /** 未配置或非法主题色时使用的内置强调色（微信绿）。 */
+    private static final String DEFAULT_ACCENT = "#07c160";
 
-    private static final String H5_STYLE =
-        "font-size:15px;font-weight:bold;line-height:1.4;margin:1.1em 0 0.5em;color:#333333;";
+    /** H1–H6 未配置或非法时的内置默认文字颜色（下标 0 对应 H1）。 */
+    private static final String[] DEFAULT_HEADING_COLORS =
+        {"#222222", "#222222", "#222222", "#222222", "#333333", "#888888"};
 
-    private static final String H6_STYLE =
-        "font-size:14px;font-weight:bold;line-height:1.4;margin:1.1em 0 0.5em;color:#888888;";
+    /** 仅接受 3/6/8 位十六进制颜色，避免把非法值写进 style 破坏样式。 */
+    private static final Pattern HEX_COLOR =
+        Pattern.compile("#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})");
 
-    private static final String P_STYLE =
-        "margin:0.9em 0;line-height:1.75;font-size:16px;color:#3f3f3f;letter-spacing:0.4px;";
+    /** 代码块统一等宽字体栈。 */
+    private static final String CODE_FONT =
+        "font-family:Consolas,'Liberation Mono',Menlo,Courier,monospace;";
 
     /** 引用块内的段落：收紧上下间距，避免与引用块自身的内边距叠加。 */
     private static final String QUOTE_P_STYLE =
         "margin:0.3em 0;line-height:1.7;font-size:15px;color:#666666;";
 
-    private static final String BLOCKQUOTE_STYLE =
-        "margin:1em 0;padding:10px 15px;border-left:4px solid #dcdcdc;background:#f7f7f7;"
-            + "color:#666666;border-radius:0 4px 4px 0;";
-
     /**
-     * 代码块容器：对齐微信后台「插入代码」的原生观感——浅灰底 + 极细内阴影边框（而非实线 border）、
-     * 小圆角、Consolas 优先的等宽字体；{@code overflow-x:auto} 支持长行横向滚动。
+     * 代码块（浅色）：对齐微信后台「插入代码」的原生观感——浅灰底 + 极细内阴影边框（而非实线
+     * border）+ 小圆角；{@code overflow-x:auto} + {@code white-space:pre} 让长行不折行、发布后可横向
+     * 拖拽，缩进原样保留。
      */
-    private static final String PRE_STYLE =
-        "margin:1em 0;padding:10px;overflow-x:auto;text-align:left;background-color:#f8f8f8;"
+    private static final String CODE_BLOCK_LIGHT =
+        "margin:1em 0;overflow-x:auto;padding:10px 12px;background-color:#f8f8f8;"
             + "box-shadow:rgba(216,216,216,0.5) 0 0 0 1px inset;border-radius:3px;"
-            + "font-size:14px;line-height:1.6;color:#333333;white-space:pre;word-wrap:normal;"
-            + "font-family:Consolas,'Liberation Mono',Menlo,Courier,monospace;";
+            + "font-size:14px;line-height:1.6;text-align:left;color:#333333;white-space:pre;"
+            + "word-wrap:normal;" + CODE_FONT;
 
-    /** 代码块内的 {@code code}：不再单独加底色/圆角，交由 {@code pre} 承载，字体与行高与容器一致。 */
-    private static final String PRE_CODE_STYLE =
-        "background:transparent;padding:0;border-radius:0;font-size:14px;line-height:1.6;color:inherit;"
-            + "white-space:pre;font-family:Consolas,'Liberation Mono',Menlo,Courier,monospace;";
-
-    private static final String INLINE_CODE_STYLE =
-        "padding:2px 5px;margin:0 2px;background:#f2f3f5;border-radius:3px;font-size:14px;color:#d63200;"
-            + "font-family:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,Courier,monospace;";
+    /** 代码块（深色）：One Dark 观感，深底浅字，适合技术类公众号。 */
+    private static final String CODE_BLOCK_DARK =
+        "margin:1em 0;overflow-x:auto;padding:12px 15px;background-color:#282c34;border-radius:5px;"
+            + "font-size:14px;line-height:1.6;text-align:left;color:#abb2bf;white-space:pre;"
+            + "word-wrap:normal;" + CODE_FONT;
 
     private static final String UL_STYLE = "margin:0.9em 0;padding-left:1.6em;list-style:disc;";
 
     private static final String OL_STYLE = "margin:0.9em 0;padding-left:1.6em;list-style:decimal;";
-
-    private static final String LI_STYLE = "margin:0.35em 0;line-height:1.75;font-size:16px;color:#3f3f3f;";
 
     private static final String IMG_STYLE =
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
@@ -98,12 +99,7 @@ final class WechatContentBeautifier {
     private static final String TH_STYLE =
         "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;background:#f6f8fa;font-weight:bold;color:#333333;";
 
-    private static final String TD_STYLE =
-        "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;color:#3f3f3f;";
-
     private static final String HR_STYLE = "border:none;border-top:1px solid #eaeaea;margin:1.6em 0;";
-
-    private static final String A_STYLE = "color:#576b95;text-decoration:none;";
 
     private static final String FIGCAPTION_STYLE = "text-align:center;font-size:13px;color:#999999;margin-top:6px;";
 
@@ -113,29 +109,32 @@ final class WechatContentBeautifier {
     /**
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
-     * @param html Halo 渲染并经图片转存后的正文 HTML
+     * @param html   Halo 渲染并经图片转存后的正文 HTML
+     * @param config 美化配置（引用块边框色、标题边框开关与 H2–H6 逐级边框色、代码块主题、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
-    static String beautify(String html) {
+    static String beautify(String html, BeautifySetting config) {
         if (html == null || html.isBlank()) {
             return html == null ? "" : html;
         }
+        BeautifySetting cfg = config == null ? new BeautifySetting() : config;
         Document document = Jsoup.parseBodyFragment(html);
-        // 关闭美化缩进，避免在行内元素之间插入换行/空格（微信会渲染成多余空白），也保证 <pre> 内容原样输出
+        // 关闭美化缩进，避免在行内元素之间插入换行/空格（微信会渲染成多余空白），也保证代码列内容原样输出
         document.outputSettings().prettyPrint(false);
         Element body = document.body();
         if (body == null) {
             return html;
         }
         sanitize(body);
-        injectStyles(body);
-        convertPreNewlinesToBr(body);
-        wrapWithBase(body);
+        // 代码块重建须在通用样式注入前：重建后 <pre> 已不存在，剩余 <code> 即行内代码
+        buildCodeBlocks(body, cfg);
+        injectStyles(body, cfg);
+        wrapWithBase(body, cfg);
         return body.html();
     }
 
     /**
-     * 安全清理：移除 {@code <script>}/{@code <style>} 标签与所有 {@code on*} 事件属性。
+     * 安全清理：移除 {@code <script>}/{@code <style>} 等标签与所有 {@code on*} 事件属性。
      * 微信自身也会剥离，这里主动清理让产物更干净、也避免残留可执行内容。
      */
     private static void sanitize(Element body) {
@@ -151,88 +150,179 @@ final class WechatContentBeautifier {
         }
     }
 
-    /** 按标签名注入内联样式。 */
-    private static void injectStyles(Element body) {
-        applyAll(body, "h1", H1_STYLE);
-        applyAll(body, "h2", H2_STYLE);
-        applyAll(body, "h3", H3_STYLE);
-        applyAll(body, "h4", H4_STYLE);
-        applyAll(body, "h5", H5_STYLE);
-        applyAll(body, "h6", H6_STYLE);
-        applyAll(body, "blockquote", BLOCKQUOTE_STYLE);
-        applyAll(body, "pre", PRE_STYLE);
+    /** 按标签名注入内联样式（代码块已在 {@link #buildCodeBlocks} 单独重建，此处不再处理 pre）。 */
+    private static void injectStyles(Element body, BeautifySetting cfg) {
+        String accent = color(cfg.getThemeColor(), DEFAULT_ACCENT);
+        String textColor = color(cfg.getTextColor(), DEFAULT_TEXT_COLOR);
+        String linkColor = color(cfg.getLinkColor(), DEFAULT_LINK_COLOR);
+        String inlineCodeColor = color(cfg.getInlineCodeColor(), DEFAULT_INLINE_CODE_COLOR);
+        String inlineCodeBgColor = color(cfg.getInlineCodeBgColor(), DEFAULT_INLINE_CODE_BG_COLOR);
+        // 「标题显示边框」开启后，H2–H6 各自加左侧强调边框（H1 居中不加），每级边框色独立配置
+        boolean headingBorder = cfg.isHeadingBorderEnabled();
+        applyAll(body, "h1", headingStyle("font-size:22px;text-align:center;margin:1.4em 0 0.9em;",
+            color(cfg.getH1Color(), DEFAULT_HEADING_COLORS[0]), ""));
+        applyAll(body, "h2", headingStyle("font-size:19px;margin:1.6em 0 0.9em;",
+            color(cfg.getH2Color(), DEFAULT_HEADING_COLORS[1]),
+            headingBorderCss(headingBorder, cfg.getH2BorderColor())));
+        applyAll(body, "h3", headingStyle("font-size:17px;margin:1.4em 0 0.7em;",
+            color(cfg.getH3Color(), DEFAULT_HEADING_COLORS[2]),
+            headingBorderCss(headingBorder, cfg.getH3BorderColor())));
+        applyAll(body, "h4", headingStyle("font-size:16px;margin:1.2em 0 0.6em;",
+            color(cfg.getH4Color(), DEFAULT_HEADING_COLORS[3]),
+            headingBorderCss(headingBorder, cfg.getH4BorderColor())));
+        applyAll(body, "h5", headingStyle("font-size:15px;margin:1.1em 0 0.5em;",
+            color(cfg.getH5Color(), DEFAULT_HEADING_COLORS[4]),
+            headingBorderCss(headingBorder, cfg.getH5BorderColor())));
+        applyAll(body, "h6", headingStyle("font-size:14px;margin:1.1em 0 0.5em;",
+            color(cfg.getH6Color(), DEFAULT_HEADING_COLORS[5]),
+            headingBorderCss(headingBorder, cfg.getH6BorderColor())));
+        applyAll(body, "blockquote", blockquoteStyle(accent));
         applyAll(body, "ul", UL_STYLE);
         applyAll(body, "ol", OL_STYLE);
-        applyAll(body, "li", LI_STYLE);
+        applyAll(body, "li", liStyle(textColor));
         applyAll(body, "img", IMG_STYLE);
         applyAll(body, "table", TABLE_STYLE);
         applyAll(body, "th", TH_STYLE);
-        applyAll(body, "td", TD_STYLE);
+        applyAll(body, "td", tdStyle(textColor));
         applyAll(body, "hr", HR_STYLE);
-        applyAll(body, "a", A_STYLE);
+        applyAll(body, "a", aStyle(linkColor));
         applyAll(body, "figcaption", FIGCAPTION_STYLE);
+        // 代码块已重建为 section，剩余 <code> 均为行内代码
+        applyAll(body, "code", inlineCodeStyle(inlineCodeColor, inlineCodeBgColor));
 
         // 段落：引用块内外的间距不同，分别处理，避免二次注入导致样式顺序错乱
         for (Element p : body.select("p")) {
-            applyStyle(p, isInside(p, "blockquote") ? QUOTE_P_STYLE : P_STYLE);
+            applyStyle(p, isInside(p, "blockquote") ? QUOTE_P_STYLE : pStyle(textColor));
         }
-        // 行内代码与代码块内代码样式不同
-        for (Element code : body.select("code")) {
-            applyStyle(code, isInside(code, "pre") ? PRE_CODE_STYLE : INLINE_CODE_STYLE);
+    }
+
+    /** 组装标题样式：字号/对齐/间距 + 可选左侧强调边框 + 统一粗体行高 + 可配置文字颜色。 */
+    private static String headingStyle(String sizeAndSpacing, String color, String borderCss) {
+        return sizeAndSpacing + borderCss + "font-weight:bold;line-height:1.4;color:" + color + ";";
+    }
+
+    /** 标题左侧强调边框样式：仅在开启「标题显示边框」时生成，颜色非法/缺省回退默认强调色。 */
+    private static String headingBorderCss(boolean enabled, String borderColor) {
+        return enabled
+            ? "padding-left:12px;border-left:4px solid " + color(borderColor, DEFAULT_ACCENT) + ";"
+            : "";
+    }
+
+    /**
+     * 把每个 {@code <pre>} 重建为微信原生风格的单栏代码块（不加行号）。
+     *
+     * <p>微信只保留内联样式，代码文本用 {@link Element#wholeText()} 原样取出（保留缩进与换行），
+     * 按行拆分后逐行写入并以 {@code <br>} 断行；容器 {@code overflow-x:auto} + {@code white-space:pre}
+     * 让长行不折行、发布后可横向拖拽。</p>
+     */
+    private static void buildCodeBlocks(Element body, BeautifySetting cfg) {
+        boolean dark = isDarkCode(cfg.getCodeBlockTheme());
+        String blockStyle = dark ? CODE_BLOCK_DARK : CODE_BLOCK_LIGHT;
+        for (Element pre : body.select("pre")) {
+            List<String> lines = extractCodeLines(pre);
+            Element block = new Element(Tag.valueOf("section"), "");
+            block.attr("style", blockStyle);
+            for (int i = 0; i < lines.size(); i++) {
+                if (i > 0) {
+                    block.appendChild(new Element(Tag.valueOf("br"), ""));
+                }
+                if (!lines.get(i).isEmpty()) {
+                    block.appendChild(new TextNode(lines.get(i)));
+                }
+            }
+            pre.replaceWith(block);
         }
     }
 
     /**
-     * 把代码块内的裸换行转成 {@code <br>}。
-     *
-     * <p>微信（尤其后台草稿编辑器）可能吞掉 {@code <pre>} 内的 {@code \n}，导致整段代码挤成一行。
-     * 这里逐行拆开、以 {@code <br>} 显式断行；缩进空格仍由 {@code white-space:pre} 保留，故排版与原生一致。</p>
+     * 取出 {@code <pre>} 的纯文本并按行拆分：先归一换行符，再剥掉渲染器常引入的首/尾空行；
+     * 空代码块至少返回一个空行，保证结构完整。
      */
-    private static void convertPreNewlinesToBr(Element body) {
-        for (Element pre : body.select("pre")) {
-            // pre.textNodes() 只含直接子文本节点，而代码常在 <pre><code>…</code></pre> 的 code 里，
-            // 故递归收集全部后代文本节点；用快照列表遍历，插入的新节点不会被重复处理
-            List<TextNode> textNodes = new ArrayList<>();
-            for (Element element : pre.getAllElements()) {
-                textNodes.addAll(element.textNodes());
-            }
-            for (TextNode textNode : textNodes) {
-                String text = textNode.getWholeText();
-                if (text.indexOf('\n') < 0 && text.indexOf('\r') < 0) {
-                    continue;
-                }
-                String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
-                String[] lines = normalized.split("\n", -1);
-                Node current = textNode;
-                for (int i = 0; i < lines.length; i++) {
-                    if (i > 0) {
-                        Element br = new Element(Tag.valueOf("br"), "");
-                        current.after(br);
-                        current = br;
-                    }
-                    if (!lines[i].isEmpty()) {
-                        TextNode segment = new TextNode(lines[i]);
-                        current.after(segment);
-                        current = segment;
-                    }
-                }
-                textNode.remove();
-            }
+    private static List<String> extractCodeLines(Element pre) {
+        String text = pre.wholeText();
+        if (text == null) {
+            text = "";
         }
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
+        List<String> lines = new ArrayList<>(Arrays.asList(normalized.split("\n", -1)));
+        if (lines.size() > 1 && lines.get(0).isEmpty()) {
+            lines.remove(0);
+        }
+        if (lines.size() > 1 && lines.get(lines.size() - 1).isEmpty()) {
+            lines.remove(lines.size() - 1);
+        }
+        if (lines.isEmpty()) {
+            lines.add("");
+        }
+        return lines;
     }
 
     /**
      * 用一个带基础排版样式的 {@code <section>} 包裹全部正文，使裸文本与未显式设样式的行内元素
      * （如 {@code span}/{@code em}）也能继承统一的字体、字号与行高。
      */
-    private static void wrapWithBase(Element body) {
+    private static void wrapWithBase(Element body, BeautifySetting cfg) {
         Element wrapper = new Element(Tag.valueOf("section"), "");
-        wrapper.attr("style", BASE_STYLE);
+        wrapper.attr("style", baseStyle(color(cfg.getTextColor(), DEFAULT_TEXT_COLOR)));
         List<Node> children = new ArrayList<>(body.childNodes());
         for (Node child : children) {
             wrapper.appendChild(child);
         }
         body.appendChild(wrapper);
+    }
+
+    private static String blockquoteStyle(String accent) {
+        return "margin:1em 0;padding:10px 15px;border-left:4px solid " + accent + ";background:#f7f7f7;"
+            + "color:#666666;border-radius:0 4px 4px 0;";
+    }
+
+    /** 正文根节点基础排版：字体、字号、行高与可配置正文色，供未显式覆盖的后代继承。 */
+    private static String baseStyle(String textColor) {
+        return "font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue','PingFang SC','Hiragino Sans GB',"
+            + "'Microsoft YaHei',Arial,sans-serif;"
+            + "font-size:16px;color:" + textColor + ";line-height:1.75;letter-spacing:0.4px;"
+            + "word-break:break-word;text-align:left;";
+    }
+
+    private static String pStyle(String textColor) {
+        return "margin:0.9em 0;line-height:1.75;font-size:16px;color:" + textColor + ";letter-spacing:0.4px;";
+    }
+
+    private static String liStyle(String textColor) {
+        return "margin:0.35em 0;line-height:1.75;font-size:16px;color:" + textColor + ";";
+    }
+
+    private static String tdStyle(String textColor) {
+        return "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;color:" + textColor + ";";
+    }
+
+    private static String aStyle(String linkColor) {
+        return "color:" + linkColor + ";text-decoration:none;";
+    }
+
+    /**
+     * 行内代码：对齐 doocs/md「经典」主题（微信图文行内代码的事实标准）——{@code font-size:90%}、
+     * {@code padding:3px 5px}、{@code border-radius:4px} 与 Fira Code/Menlo/Consolas 等宽字体栈；
+     * 文字色与底色可由配置覆盖（默认 {@code #d14} 字 + 浅灰底）。
+     */
+    private static String inlineCodeStyle(String inlineCodeColor, String inlineCodeBgColor) {
+        return "font-size:90%;padding:3px 5px;border-radius:4px;background:" + inlineCodeBgColor
+            + ";color:" + inlineCodeColor
+            + ";font-family:'Fira Code',Menlo,Operator Mono,Consolas,Monaco,monospace;";
+    }
+
+    /** 解析颜色：仅接受合法十六进制颜色，否则回退给定默认色。 */
+    private static String color(String value, String fallback) {
+        if (value == null) {
+            return fallback;
+        }
+        String trimmed = value.trim();
+        return HEX_COLOR.matcher(trimmed).matches() ? trimmed : fallback;
+    }
+
+    /** 代码块是否用深色主题（仅当显式配置为 {@code dark}）。 */
+    private static boolean isDarkCode(String codeBlockTheme) {
+        return codeBlockTheme != null && "dark".equalsIgnoreCase(codeBlockTheme.trim());
     }
 
     private static void applyAll(Element body, String cssQuery, String style) {
