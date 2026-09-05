@@ -60,7 +60,8 @@ public class WechatSyncService {
         String content) {
         Map<String, Object> article = new HashMap<>();
         article.put("title", request.getTitle() == null ? "" : request.getTitle());
-        article.put("author", firstNonBlank(request.getAuthor(), setting.getAuthor()));
+        // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
+        article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
         article.put("digest", request.getDigest() == null ? "" : request.getDigest());
         article.put("content", content);
         article.put("content_source_url", "");
