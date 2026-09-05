@@ -11,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.infra.ExternalUrlSupplier;
@@ -52,8 +53,20 @@ public class WechatSyncService {
                     .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
                         request.getTitle(), thumbMediaId))
                     .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
-                        .flatMap(content -> wechatMpClient.addDraft(apiBase, token,
-                            buildArticle(request, setting, thumbMediaId, content))))));
+                        .flatMap(content -> beautifyContent(content)
+                            .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
+                                buildArticle(request, setting, thumbMediaId, beautified)))))));
+    }
+
+    /**
+     * 美化正文：为常见标签注入微信友好的内联样式（微信会剥离 class 与外部 CSS，只保留行内 style）。
+     *
+     * <p>jsoup 解析与 DOM 改写属 CPU 操作，切到 {@link Schedulers#boundedElastic()} 执行，避免占用
+     * Netty 事件循环线程；具体样式规则见 {@link WechatContentBeautifier}。</p>
+     */
+    private Mono<String> beautifyContent(String content) {
+        return Mono.fromCallable(() -> WechatContentBeautifier.beautify(content))
+            .subscribeOn(Schedulers.boundedElastic());
     }
 
     private Map<String, Object> buildArticle(SyncRequest request, WechatSetting setting, String thumbMediaId,
@@ -108,6 +121,8 @@ public class WechatSyncService {
             return Mono.just(html == null ? "" : html);
         }
         Document document = Jsoup.parseBodyFragment(html);
+        // 关闭美化缩进，保留正文原有的空白/换行，避免引入多余空格
+        document.outputSettings().prettyPrint(false);
         Elements images = document.select("img[src]");
         if (images.isEmpty()) {
             return Mono.just(document.body().html());
