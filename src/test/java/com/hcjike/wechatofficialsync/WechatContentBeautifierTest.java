@@ -156,6 +156,104 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void tableCellParagraphHasNoVerticalMargin() {
+        // Halo/TipTap 把单元格内容包在 <p> 里，若不处理会沿用正文段落 margin:0.9em 0，
+        // 导致首/末行单元格在表格上下各多出一段空白
+        String html = "<table><tr><td><p>单元格段落</p></td></tr></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 单元格内段落外边距置 0
+        assertThat(result).contains("margin:0;line-height:1.6;font-size:15px");
+        // 不再给单元格段落注入正文段落的 0.9em 上下外边距
+        assertThat(result).doesNotContain("margin:0.9em 0");
+    }
+
+    @Test
+    void removesEmptyProseMirrorParagraphsAroundTable() {
+        // TipTap/ProseMirror 在表格前后遗留的空段落，在微信里会渲染成多余空行，应被删除
+        String html = "<p>上文</p>"
+            + "<p><span leaf=\"\"><br class=\"ProseMirror-trailingBreak\"></span></p>"
+            + "<table><tr><td>值</td></tr></table>"
+            + "<p><span leaf=\"\"><br class=\"ProseMirror-trailingBreak\"></span></p>"
+            + "<p><br></p>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 不再残留尾随换行占位与空 <br> 段落
+        assertThat(result).doesNotContain("ProseMirror-trailingBreak");
+        // 仅剩「上文」「下文」两个非空段落
+        int paragraphs = result.split("<p ", -1).length - 1;
+        assertThat(paragraphs).isEqualTo(2);
+        assertThat(result).contains("上文");
+        assertThat(result).contains("下文");
+        // 表格保留
+        assertThat(result).contains("<table");
+    }
+
+    @Test
+    void removesProseMirrorTrailingBreakInsideTableCells() {
+        // TipTap 把每个单元格内容包在 <p> 里，空单元格即 <td><p><span leaf=""><br class="ProseMirror-trailingBreak"></span></p></td>，
+        // 在微信里会撑出一格格多余空白，应连同尾随换行占位一起清除（单元格内也不例外）
+        String html = "<table><tr>"
+            + "<td><p>值</p></td>"
+            + "<td><p><span leaf=\"\"><br class=\"ProseMirror-trailingBreak\"></span></p></td>"
+            + "</tr></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 不再残留尾随换行占位
+        assertThat(result).doesNotContain("ProseMirror-trailingBreak");
+        // 空单元格内的段落被删除，非空单元格「值」保留
+        assertThat(result).contains("值");
+        // 表格结构保留（仍有两个 td）
+        int cells = result.split("<td ", -1).length - 1;
+        assertThat(cells).isEqualTo(2);
+    }
+
+    @Test
+    void removesEmptyLeafParagraphsAroundRealWorldTable() {
+        // 还原用户真实文章结构（Halo 原始未注入样式的输入）：
+        // h4 + 空段落 + div.tableWrapper>table + 空段落 + blockquote，空段落带 Halo 的 <span leaf="">
+        String html = "<h4>2.2.1、系统环境变量</h4>"
+            + "<p><span leaf=\"\"></span></p>"
+            + "<div class=\"tableWrapper\"><table><tbody><tr><td>值</td></tr></tbody></table></div>"
+            + "<p><span leaf=\"\"><br class=\"ProseMirror-trailingBreak\"></span></p>"
+            + "<blockquote><p><span leaf=\"\">如需了解更多</span></p></blockquote>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 我们发出的内容里：表格上下两个空段落都被删除，不残留任何尾随换行占位
+        assertThat(result).doesNotContain("ProseMirror-trailingBreak");
+        // 仅剩引用块内那一个非空段落
+        int paragraphs = result.split("<p ", -1).length - 1;
+        assertThat(paragraphs).isEqualTo(1);
+        assertThat(result).contains("如需了解更多");
+        // 表格与引用块保留
+        assertThat(result).contains("<table");
+        assertThat(result).contains("<blockquote");
+    }
+
+    @Test
+    void keepsParagraphContainingImage() {
+        // 包着图片的段落文本为空，但含内容型后代，不能被当空段落删除
+        String html = "<p><img src=\"https://x/a.png\"></p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("<img");
+        assertThat(result).contains("max-width:100%");
+    }
+
+    @Test
+    void removesNbspAndZeroWidthEmptyParagraphs() {
+        // TipTap 空段落变体：仅含 &nbsp; 或零宽空格，Java isBlank() 不视其为空白，需专门剔除
+        String html = "<p>正文</p><p>&nbsp;</p><p>\u200b</p><p>   </p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 仅剩「正文」一个非空段落
+        int paragraphs = result.split("<p ", -1).length - 1;
+        assertThat(paragraphs).isEqualTo(1);
+        assertThat(result).contains("正文");
+    }
+
+    @Test
     void customThemeColorIsAppliedToBlockquote() {
         BeautifySetting cfg = new BeautifySetting();
         cfg.setThemeColor("#ff5500");

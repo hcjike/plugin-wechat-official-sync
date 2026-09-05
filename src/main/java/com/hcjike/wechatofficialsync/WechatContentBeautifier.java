@@ -11,6 +11,8 @@ import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
 import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.Tag;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 正文美化器：把 Halo 渲染出的正文 HTML 转换为「微信友好」的内联样式 HTML。
@@ -28,6 +30,8 @@ import org.jsoup.parser.Tag;
  * @since 1.0.0
  */
 final class WechatContentBeautifier {
+
+    private static final Logger log = LoggerFactory.getLogger(WechatContentBeautifier.class);
 
     /** 未配置或非法时使用的内置默认正文文字色（根节点/段落/列表/表格正文共用）。 */
     private static final String DEFAULT_TEXT_COLOR = "#3f3f3f";
@@ -124,6 +128,13 @@ final class WechatContentBeautifier {
 
     private static final String FIGCAPTION_STYLE = "text-align:center;font-size:13px;color:#999999;margin-top:6px;";
 
+    /**
+     * 内容型标签：段落若含这些后代则视为非空，不能被当作空段落删除。
+     * 用于区分「仅含 {@code <br>}/空 {@code <span>} 的占位空段落」与「包着图片/表格等内容的段落」。
+     */
+    private static final java.util.Set<String> CONTENT_BEARING_TAGS = java.util.Set.of(
+        "img", "table", "iframe", "video", "audio", "embed", "object", "svg", "code", "pre", "math");
+
     private WechatContentBeautifier() {
     }
 
@@ -147,6 +158,8 @@ final class WechatContentBeautifier {
             return html;
         }
         sanitize(body);
+        // 删除 TipTap/ProseMirror 在表格等块前后遗留的空段落（否则微信里渲染成多余空行）
+        removeEmptyParagraphs(body);
         // 代码块重建须在通用样式注入前：重建后 <pre> 已不存在，剩余 <code> 即行内代码
         buildCodeBlocks(body, cfg);
         // 表格包裹须在通用样式注入前：外层滚动容器就位后，table/th/td 样式仍按标签名注入
@@ -171,6 +184,64 @@ final class WechatContentBeautifier {
             }
             eventAttrs.forEach(element::removeAttr);
         }
+    }
+
+    /**
+     * 删除「视觉空段落」：仅含空白文本与 {@code <br>}/空 {@code <span>} 的 {@code <p>}。
+     *
+     * <p>Halo/TipTap 会在表格等块前后遗留形如
+     * {@code <p><span leaf=""><br class="ProseMirror-trailingBreak"></span></p>} 的空段落，
+     * 在微信里渲染成多余的空行（表现为表格上下多出空白）。含图片/表格/代码等内容型后代的
+     * 段落不删。</p>
+     *
+     * <p>{@code ProseMirror-trailingBreak} 是纯编辑器渲染产物（ProseMirror 为让空块可见而插入的尾随
+     * {@code <br>}），发布内容里完全多余，故先整体移除；移除后表格<b>单元格内</b>的空段落
+     * （如 {@code <td><p><span leaf=""><br class="ProseMirror-trailingBreak"></span></p></td>}）也随之
+     * 变成视觉空段落被一并删除，空单元格留 {@code <td></td>} 一样正常渲染（有边框与内边距），
+     * 不再在微信里撑出一格格多余空白。</p>
+     */
+    private static void removeEmptyParagraphs(Element body) {
+        // 先移除 ProseMirror 尾随换行占位 <br>，让空单元格/空段落暴露为「视觉空段落」，随后统一删除
+        body.select("br.ProseMirror-trailingBreak").remove();
+        int removed = 0;
+        for (Element p : body.select("p")) {
+            if (isVisuallyEmpty(p)) {
+                p.remove();
+                removed++;
+            }
+        }
+        if (removed > 0) {
+            log.info("正文美化：移除了 {} 个空段落（TipTap/ProseMirror 遗留的空行占位）", removed);
+        }
+    }
+
+    /**
+     * 段落是否「视觉为空」：不含任何内容型后代（图片/表格/代码等），且去掉常规空白与
+     * 不可见字符（不间断空格 {@code \u00a0}、零宽字符、BOM）后无可见文本。兼容 TipTap 空段落
+     * 可能携带 {@code &nbsp;} 或零宽空格的变体。
+     */
+    private static boolean isVisuallyEmpty(Element paragraph) {
+        for (Element descendant : paragraph.getAllElements()) {
+            if (CONTENT_BEARING_TAGS.contains(descendant.tagName().toLowerCase(java.util.Locale.ROOT))) {
+                return false;
+            }
+        }
+        return hasNoVisibleText(paragraph.text());
+    }
+
+    /** 去掉常规空白与不可见字符（nbsp/零宽空格/BOM）后是否已无可见文本。 */
+    private static boolean hasNoVisibleText(String text) {
+        if (text == null) {
+            return true;
+        }
+        for (int i = 0; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (!Character.isWhitespace(c) && c != '\u00a0' && c != '\u200b' && c != '\u200c'
+                && c != '\u200d' && c != '\ufeff') {
+                return false;
+            }
+        }
+        return true;
     }
 
     /** 按标签名注入内联样式（代码块已在 {@link #buildCodeBlocks} 单独重建，此处不再处理 pre）。 */
@@ -213,9 +284,18 @@ final class WechatContentBeautifier {
         // 代码块已重建为 section，剩余 <code> 均为行内代码
         applyAll(body, "code", inlineCodeStyle(inlineCodeColor, inlineCodeBgColor));
 
-        // 段落：引用块内外的间距不同，分别处理，避免二次注入导致样式顺序错乱
+        // 段落：表格单元格内、引用块内、普通正文的间距不同，分别处理，避免二次注入导致样式顺序错乱
         for (Element p : body.select("p")) {
-            applyStyle(p, isInside(p, "blockquote") ? QUOTE_P_STYLE : pStyle(textColor));
+            String paragraphStyle;
+            if (isInside(p, "td") || isInside(p, "th")) {
+                // 单元格内段落去掉上下外边距，否则首/末行单元格会在表格上下多出空行
+                paragraphStyle = tableCellPStyle(textColor);
+            } else if (isInside(p, "blockquote")) {
+                paragraphStyle = QUOTE_P_STYLE;
+            } else {
+                paragraphStyle = pStyle(textColor);
+            }
+            applyStyle(p, paragraphStyle);
         }
     }
 
@@ -325,6 +405,15 @@ final class WechatContentBeautifier {
 
     private static String pStyle(String textColor) {
         return "margin:0.9em 0;line-height:1.75;font-size:16px;color:" + textColor + ";letter-spacing:0.4px;";
+    }
+
+    /**
+     * 表格单元格内的段落：Halo/TipTap 把单元格内容包在 {@code <p>} 里，若沿用正文段落的
+     * {@code margin:0.9em 0}，首行单元格顶部与末行单元格底部会各多出一段空白（看上去像多了
+     * 一行空行）。故单元格内段落外边距置 0，字号与表格一致（{@code 15px}），只保留较小行高。
+     */
+    private static String tableCellPStyle(String textColor) {
+        return "margin:0;line-height:1.6;font-size:15px;color:" + textColor + ";";
     }
 
     private static String liStyle(String textColor) {
