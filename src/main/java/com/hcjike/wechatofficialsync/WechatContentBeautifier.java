@@ -338,17 +338,30 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 把每个 {@code <table>} 包进一个横向滚动的 {@code <section>} 容器。
+     * 把每个 {@code <table>} 包进一个横向滚动的 {@code <section>} 容器，并移除 Halo/TipTap 编辑器的
+     * {@code <div class="tableWrapper">} 多余包裹层。
      *
      * <p>表格 {@code table-layout:fixed}（见 {@link #TABLE_STYLE}）使列宽严格按文章设定的每列宽度渲染、
      * 单元格内容在列内自动换行；当各列宽之和超出屏幕时，表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动
-     * 查看全貌。table 的 th/td 样式仍由 {@link #injectStyles} 按标签名注入，故此方法只负责包裹结构。</p>
+     * 查看全貌。</p>
+     *
+     * <p>Halo/TipTap 编辑器输出的表格通常被 {@code <div class="tableWrapper">} 包裹，该 div 在微信中无实际
+     * 作用（class 会被剥离），且多层嵌套会触发微信编辑器重构 DOM、在表格前后插入空段落（表现为发布后
+     * 表格上下多出空行）。故此方法在包裹 section 后会将多余的 div 层解开，产出更简洁的
+     * {@code <section><table></table></section>} 结构。</p>
      */
     private static void buildTables(Element body) {
         for (Element table : body.select("table")) {
             Element wrapper = new Element(Tag.valueOf("section"), "");
             wrapper.attr("style", TABLE_SCROLL_WRAPPER);
-            table.before(wrapper);
+            // 若表格直接被 <div>（如 TipTap 的 tableWrapper）包裹，用我们的 section 替换整个 div，
+            // 避免产出 <div><section><table></section></div> 多层嵌套结构
+            Element parent = table.parent();
+            if (parent != null && "div".equalsIgnoreCase(parent.tagName()) && parent.children().size() == 1) {
+                parent.replaceWith(wrapper);
+            } else {
+                table.before(wrapper);
+            }
             wrapper.appendChild(table);
         }
     }
