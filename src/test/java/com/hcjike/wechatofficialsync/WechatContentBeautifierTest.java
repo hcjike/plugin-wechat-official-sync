@@ -423,4 +423,104 @@ class WechatContentBeautifierTest {
         assertThat(result).contains("background:#f2f3f5");
         assertThat(result).doesNotContain("bad");
     }
+
+    @Test
+    void hyperlinkInlineCardIsConvertedToAnchor() {
+        // Halo 链接卡片插件注入的自定义元素，微信无法渲染，应转为标准 <a> 并保留链接文字
+        String html = "<p>开源项目 "
+            + "<HYPERLINK-INLINE-CARD target=\"_blank\" href=\"https://github.com/rwv/chinese-dos-games\" "
+            + "theme=\"inline\" custom-title=\"rwv/chinese-dos-games\" custom-image=\"data:image/svg+xml,x\">"
+            + "<span leaf=\"\">https://github.com/rwv/chinese-dos-games</span></HYPERLINK-INLINE-CARD>"
+            + "，中文 DOS 游戏合集。</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 自定义标签被清除，转为可点击链接，链接文字与地址保留
+        assertThat(result).doesNotContain("HYPERLINK-INLINE-CARD");
+        assertThat(result).doesNotContain("hyperlink-inline-card");
+        assertThat(result).contains("<a href=\"https://github.com/rwv/chinese-dos-games\"");
+        assertThat(result).contains("target=\"_blank\"");
+        assertThat(result).contains("中文 DOS 游戏合集");
+        // 转换后的 <a> 被注入链接色
+        assertThat(result).contains("color:#576b95");
+    }
+
+    @Test
+    void downloadLinksInsideParagraphIsConvertedToAnchor() {
+        // Halo 下载链接插件：<p> 内包着空的 <DOWNLOAD-LINKS>，真实地址在 data-links JSON 里
+        String html = "<p>上文</p>"
+            + "<p><DOWNLOAD-LINKS data-links=\"[{&quot;url&quot;:&quot;https://pan.baidu.com/s/1abc?pwd=6h1c&quot;,"
+            + "&quot;filename&quot;:&quot;game.zip&quot;,&quot;source&quot;:&quot;百度云网盘&quot;,"
+            + "&quot;code&quot;:&quot;6h1c&quot;,&quot;icon&quot;:&quot;/x.png&quot;}]\"></DOWNLOAD-LINKS></p>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 自定义标签被清除，转为下载链接
+        assertThat(result).doesNotContain("DOWNLOAD-LINKS");
+        assertThat(result).doesNotContain("download-links");
+        assertThat(result).doesNotContain("data-links");
+        assertThat(result).contains("<a href=\"https://pan.baidu.com/s/1abc?pwd=6h1c\"");
+        // 链接文字只用 URL，不带文件名/来源/提取码等描述
+        assertThat(result).contains(">https://pan.baidu.com/s/1abc?pwd=6h1c</a>");
+        assertThat(result).doesNotContain("game.zip");
+        assertThat(result).doesNotContain("百度云网盘");
+        assertThat(result).doesNotContain("提取码");
+    }
+
+    @Test
+    void figureIsDowngradedToParagraph() {
+        // Halo 用 <figure> 包图片，微信编辑器不认识会在其前后插入空 <p>，应降级为标准 <p>
+        String html = "<p>上文</p>"
+            + "<figure data-content-type=\"image\" style=\"display: flex; flex-direction: column\">"
+            + "<img src=\"https://x/a.png\"></figure>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // <figure> 已不存在，图片改由带样式的 <p> 承载，Halo 的 display:flex 布局样式被丢弃
+        assertThat(result).doesNotContain("<figure");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).contains("<img");
+        assertThat(result).contains("max-width:100%");
+        // 图片所在 <p> 被注入段落样式
+        assertThat(result).contains("<p style=\"margin:0.9em 0");
+    }
+
+    @Test
+    void summaryIsDowngradedToParagraphAndKeepsText() {
+        // 单独的 <summary>（无 <details> 父）微信不识别，应降级为 <p> 并保留其文字
+        String html = "<summary><span leaf=\"\">百度云盘下载，约34.14GB</span></summary>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<summary");
+        assertThat(result).contains("百度云盘下载，约34.14GB");
+        assertThat(result).contains("<p style=\"margin:0.9em 0");
+    }
+
+    @Test
+    void downloadLinksWithoutValidDataIsRemovedWithItsEmptyParagraph() {
+        // data-links 解析不出有效地址时移除该组件，其外层空 <p> 也一并被清理，不残留空行
+        String html = "<p>上文</p>"
+            + "<p><DOWNLOAD-LINKS data-links=\"[]\"></DOWNLOAD-LINKS></p>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("download-links");
+        // 仅剩「上文」「下文」两个非空段落
+        int paragraphs = result.split("<p ", -1).length - 1;
+        assertThat(paragraphs).isEqualTo(2);
+        assertThat(result).contains("上文");
+        assertThat(result).contains("下文");
+    }
+
+    @Test
+    void standaloneDownloadLinksIsWrappedInParagraph() {
+        // 块级位置的 <DOWNLOAD-LINKS>（未被 <p> 包裹）转换后应新建 <p> 承载，避免裸链接
+        String html = "<p>上文</p>"
+            + "<DOWNLOAD-LINKS data-links=\"[{&quot;url&quot;:&quot;https://x/f.zip&quot;,"
+            + "&quot;filename&quot;:&quot;f.zip&quot;}]\"></DOWNLOAD-LINKS>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("download-links");
+        assertThat(result).contains("<a href=\"https://x/f.zip\"");
+        assertThat(result).contains("f.zip");
+    }
 }

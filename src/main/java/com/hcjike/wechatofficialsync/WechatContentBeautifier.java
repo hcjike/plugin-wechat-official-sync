@@ -3,6 +3,7 @@ package com.hcjike.wechatofficialsync;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Pattern;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Attribute;
@@ -13,6 +14,8 @@ import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.json.JsonMapper;
 
 /**
  * 正文美化器：把 Halo 渲染出的正文 HTML 转换为「微信友好」的内联样式 HTML。
@@ -32,6 +35,16 @@ import org.slf4j.LoggerFactory;
 final class WechatContentBeautifier {
 
     private static final Logger log = LoggerFactory.getLogger(WechatContentBeautifier.class);
+
+    /** 解析 Halo 插件自定义元素（如 {@code <DOWNLOAD-LINKS>}）中 JSON 数据属性用。 */
+    private static final ObjectMapper JSON = JsonMapper.builder().build();
+
+    /**
+     * 承载下载链接等块级自定义元素转换结果的「行内容器」标签：当自定义元素已位于这些标签内时，
+     * 直接把链接插入原位置即可，避免产出 {@code <p><p>...</p></p>} 之类的非法嵌套。
+     */
+    private static final java.util.Set<String> INLINE_CONTAINER_TAGS = java.util.Set.of(
+        "p", "li", "td", "th", "blockquote", "figcaption");
 
     /** 未配置或非法时使用的内置默认正文文字色（根节点/段落/列表/表格正文共用）。 */
     private static final String DEFAULT_TEXT_COLOR = "#3f3f3f";
@@ -158,6 +171,12 @@ final class WechatContentBeautifier {
             return html;
         }
         sanitize(body);
+        // 转换 Halo 插件注入的自定义 Web Component（链接卡片/下载链接等），微信无法渲染，
+        // 需在样式注入前转为标准 <a>/<p>；转换后遗留的空段落交由 removeEmptyParagraphs 清理
+        convertPluginCustomElements(body);
+        // 把 <figure>/<summary>/<details> 等微信不识别的块级包装降级为标准 <p>，
+        // 否则微信编辑器会在这些块前后插入空 <p> 占位（发布后表现为图片/折叠块上下多出空行）
+        normalizeBlockWrappers(body);
         // 删除 TipTap/ProseMirror 在表格等块前后遗留的空段落（否则微信里渲染成多余空行）
         removeEmptyParagraphs(body);
         // 代码块重建须在通用样式注入前：重建后 <pre> 已不存在，剩余 <code> 即行内代码
@@ -183,6 +202,159 @@ final class WechatContentBeautifier {
                 }
             }
             eventAttrs.forEach(element::removeAttr);
+        }
+    }
+
+    /**
+     * 转换 Halo 插件注入的自定义 Web Component（标签名非标准 HTML，如链接卡片
+     * {@code <HYPERLINK-INLINE-CARD>}、下载链接 {@code <DOWNLOAD-LINKS>}）。
+     *
+     * <p>微信图文只渲染标准 HTML + 内联样式，这些自定义元素在草稿里既不会显示为卡片，其空的
+     * 占位又会被微信编辑器包成 {@code <p>} 而渲染成多余空行。故在样式注入前统一处理：</p>
+     * <ul>
+     *   <li>{@code <DOWNLOAD-LINKS>}：解析 {@code data-links} JSON，逐条转为可点击的 {@code <a>} 下载链接；</li>
+     *   <li>携带 {@code href} 的自定义卡片（如 {@code <HYPERLINK-INLINE-CARD>}）：转为标准 {@code <a>}，保留其子内容；</li>
+     *   <li>其余自定义元素：解包（保留子内容），子内容为空时等同于移除。</li>
+     * </ul>
+     */
+    private static void convertPluginCustomElements(Element body) {
+        // 先快照所有非标准标签，避免边遍历边替换导致并发修改
+        List<Element> customElements = new ArrayList<>();
+        for (Element element : body.getAllElements()) {
+            if (!Tag.isKnownTag(element.tagName())) {
+                customElements.add(element);
+            }
+        }
+        for (Element element : customElements) {
+            // 可能已随某个祖先自定义元素被替换/移除而脱离文档，跳过
+            if (element.parent() == null) {
+                continue;
+            }
+            convertCustomElement(element);
+        }
+    }
+
+    /** 按自定义元素类型转换为标准 HTML。 */
+    private static void convertCustomElement(Element element) {
+        if ("download-links".equalsIgnoreCase(element.tagName())) {
+            convertDownloadLinks(element);
+            return;
+        }
+        String href = element.attr("href");
+        if (href != null && !href.isBlank()) {
+            // 带链接的卡片（如 HYPERLINK-INLINE-CARD）→ 标准 <a>，保留原子内容
+            Element anchor = new Element(Tag.valueOf("a"), "");
+            anchor.attr("href", href);
+            String target = element.attr("target");
+            anchor.attr("target", target.isBlank() ? "_blank" : target);
+            anchor.attr("rel", "noopener noreferrer");
+            for (Node child : new ArrayList<>(element.childNodes())) {
+                anchor.appendChild(child);
+            }
+            // 卡片内无可见文字时，回退用 custom-title 或链接地址作为文字，避免产出空链接
+            if (hasNoVisibleText(anchor.text())) {
+                String fallback = element.attr("custom-title");
+                anchor.text(fallback.isBlank() ? href : fallback);
+            }
+            element.replaceWith(anchor);
+            return;
+        }
+        // 其余自定义元素：解包保留子内容（子内容为空则等同移除，遗留空段落交由 removeEmptyParagraphs 清理）
+        element.unwrap();
+    }
+
+    /**
+     * 转换 {@code <DOWNLOAD-LINKS data-links="[...]">}：解析出每个下载地址转为 {@code <a>}。
+     * 解析不出任何链接时直接移除该元素，避免残留空占位。
+     */
+    private static void convertDownloadLinks(Element element) {
+        List<Element> anchors = buildDownloadAnchors(element.attr("data-links"));
+        if (anchors.isEmpty()) {
+            element.remove();
+            return;
+        }
+        Element parent = element.parent();
+        boolean inlineContext = parent != null
+            && INLINE_CONTAINER_TAGS.contains(parent.tagName().toLowerCase(java.util.Locale.ROOT));
+        if (inlineContext) {
+            // 已在 <p>/<li>/<td> 等行内容器内：把链接插入原位置，避免非法的 <p><p> 嵌套
+            for (int i = 0; i < anchors.size(); i++) {
+                if (i > 0) {
+                    element.before(new Element(Tag.valueOf("br"), ""));
+                }
+                element.before(anchors.get(i));
+            }
+            element.remove();
+        } else {
+            // 块级位置：新建 <p> 承载下载链接，多条以 <br> 分隔
+            Element paragraph = new Element(Tag.valueOf("p"), "");
+            for (int i = 0; i < anchors.size(); i++) {
+                if (i > 0) {
+                    paragraph.appendChild(new Element(Tag.valueOf("br"), ""));
+                }
+                paragraph.appendChild(anchors.get(i));
+            }
+            element.replaceWith(paragraph);
+        }
+    }
+
+    /**
+     * 解析 {@code data-links} JSON 数组为下载链接 {@code <a>} 列表。数组每项形如
+     * {@code {"url":...,"filename":...,"source":...,"code":...}}，链接文字<b>直接使用下载地址</b>
+     * （保留 URL、不加文件名/来源/提取码等描述）。解析失败或无有效地址时返回空列表
+     * （调用方据此移除元素），绝不阻断同步。
+     */
+    private static List<Element> buildDownloadAnchors(String dataLinks) {
+        List<Element> anchors = new ArrayList<>();
+        if (dataLinks == null || dataLinks.isBlank()) {
+            return anchors;
+        }
+        try {
+            List<?> items = JSON.readValue(dataLinks, List.class);
+            for (Object item : items) {
+                if (!(item instanceof Map<?, ?> map)) {
+                    continue;
+                }
+                String url = stringValue(map.get("url"));
+                if (url == null || url.isBlank()) {
+                    continue;
+                }
+                Element anchor = new Element(Tag.valueOf("a"), "");
+                anchor.attr("href", url);
+                anchor.attr("target", "_blank");
+                anchor.attr("rel", "noopener noreferrer");
+                anchor.text(url);
+                anchors.add(anchor);
+            }
+        } catch (RuntimeException e) {
+            log.warn("正文美化：解析下载链接 data-links 失败，将移除该下载组件：{}", e.getMessage());
+        }
+        return anchors;
+    }
+
+    /** 取 JSON 值的字符串形式，{@code null} 原样返回。 */
+    private static String stringValue(Object value) {
+        return value == null ? null : String.valueOf(value);
+    }
+
+    /**
+     * 把微信编辑器不友好的块级包装标签降级为标准 {@code <p>}：Halo 用 {@code <figure>} 包图片、
+     * {@code <details>}/{@code <summary>} 做折叠块，微信编辑器不认识这些块，会在其前后插入空的
+     * {@code <p>} 占位（发布后表现为图片/折叠块上下多出空行）。故在样式注入前统一降级为微信
+     * 原生支持的 {@code <p>} 块，从根源上避免编辑器插入占位空行。
+     */
+    private static void normalizeBlockWrappers(Element body) {
+        // <details> 解包（保留内部 summary 与内容），随后 summary 会被转为 <p>
+        for (Element details : body.select("details")) {
+            details.unwrap();
+        }
+        // <figure>（图片块）与 <summary>（折叠标题）→ 标准 <p>，丢弃其 Halo 布局内联样式（如 display:flex）
+        for (Element element : body.select("figure, summary")) {
+            Element paragraph = new Element(Tag.valueOf("p"), "");
+            for (Node child : new ArrayList<>(element.childNodes())) {
+                paragraph.appendChild(child);
+            }
+            element.replaceWith(paragraph);
         }
     }
 
