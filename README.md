@@ -3,7 +3,7 @@
 <p align="center">
 <a href="https://github.com/halo-dev/halo"><img alt="Halo version" src="https://img.shields.io/badge/halo-2.26.0%2B-brightgreen?style=flat-square" /></a>
 <a href="https://github.com/hcjike/plugin-wechat-official-sync/releases"><img alt="releases" src="https://img.shields.io/github/release/hcjike/plugin-wechat-official-sync.svg?style=flat-square"/></a>
-<a href="https://github.com/hcjike/plugin-wechat-official-sync/blob/master/LICENSE"><img alt="license" src="https://img.shields.io/github/license/hcjike/plugin-wechat-official-sync?style=flat-square"/></a>
+<a href="https://github.com/hcjike/plugin-wechat-official-sync/blob/main/LICENSE"><img alt="license" src="https://img.shields.io/github/license/hcjike/plugin-wechat-official-sync?style=flat-square"/></a>
 <a href="https://github.com/hcjike/plugin-wechat-official-sync/releases"><img alt="downloads" src="https://img.shields.io/github/downloads/hcjike/plugin-wechat-official-sync/total.svg?style=flat-square"/></a>
 <a href="https://github.com/hcjike/plugin-wechat-official-sync/commits"><img alt="commits" src="https://img.shields.io/github/last-commit/hcjike/plugin-wechat-official-sync.svg?style=flat-square"/></a>
 </p>
