@@ -58,9 +58,18 @@
 
 ## 安装
 
-方式一：从 Release 下载构建好的 jar，在 Halo 控制台「插件」页面上传安装。
+**方式一：应用商店安装（推荐）**
 
-方式二：自行构建（见下方[构建](#构建)），产物位于 `build/libs/*.jar`。
+- 在 Halo 后台左侧菜单进入 **应用市场**，搜索 **微信公众号同步**，点击进入详情页后一键安装；安装后新版本发布时可在后台直接升级。
+- 也可直接在浏览器打开商店页面 [微信公众号同步 - Halo 应用商店](https://www.halo.run/store/apps/app-nahksfoe/releases) 下载安装。
+
+**方式二：手动上传安装**
+
+从 [GitHub Releases](https://github.com/hcjike/plugin-wechat-official-sync/releases) 下载构建好的 jar，在 Halo 后台「插件」页面点击「安装」并上传 jar 文件。
+
+**方式三：自行构建**
+
+见下方[构建](#构建)，产物位于 `build/libs/*.jar`，再按方式二上传安装。
 
 ## 配置
 
