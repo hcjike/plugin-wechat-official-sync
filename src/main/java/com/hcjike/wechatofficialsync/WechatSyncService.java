@@ -53,16 +53,21 @@ public class WechatSyncService {
     public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify) {
         // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
         String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
-        return resolveExternalBaseUrl()
-            .flatMap(baseUrl -> resolveAppSecret(setting)
-                .flatMap(appSecret -> wechatMpClient.getAccessToken(apiBase, setting.getAppId(), appSecret)
-                    .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
-                        .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
-                            request.getTitle(), thumbMediaId))
-                        .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
-                            .flatMap(content -> beautifyContent(content, beautify)
-                                .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
-                                    buildArticle(request, setting, thumbMediaId, beautified))))))));
+        // 先在 boundedElastic 上解析图片下载内网白名单并下发给下载客户端：SsrfPolicy.parse 可能
+        // 触发阻塞式地址解析，故不放在事件循环；随后再执行同步主流程。
+        return Mono.fromCallable(() -> SsrfPolicy.parse(setting.getImageHostAllowlist()))
+            .subscribeOn(Schedulers.boundedElastic())
+            .doOnNext(wechatMpClient::setSsrfPolicy)
+            .then(Mono.defer(() -> resolveExternalBaseUrl()
+                .flatMap(baseUrl -> resolveAppSecret(setting)
+                    .flatMap(appSecret -> wechatMpClient.getAccessToken(apiBase, setting.getAppId(), appSecret)
+                        .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
+                            .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
+                                request.getTitle(), thumbMediaId))
+                            .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
+                                .flatMap(content -> beautifyContent(content, beautify)
+                                    .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
+                                        buildArticle(request, setting, thumbMediaId, beautified))))))))));
     }
 
     /**

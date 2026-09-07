@@ -39,4 +39,12 @@ public class WechatSetting {
     private String author;
 
     private boolean openComment;
+
+    /**
+     * 图片下载的内网白名单（多行文本，每行一个域名/IP/CIDR）。
+     *
+     * <p>为空时（默认）拒绝下载一切指向环回/内网/链路本地/元数据等受限地址的图片（防 SSRF）；
+     * 若 Halo 部署在内网、图片也位于内网地址导致同步失败，可在此显式添加信任的目标予以放行。</p>
+     */
+    private String imageHostAllowlist;
 }

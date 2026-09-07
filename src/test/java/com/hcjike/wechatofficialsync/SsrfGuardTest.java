@@ -99,18 +99,54 @@ class SsrfGuardTest {
     @Test
     void validateAndResolveRejectsLoopbackLiteral() {
         // IP 字面量不触发真实 DNS，可直接断言预检拒绝内网目标
-        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://127.0.0.1/upload/a.png"))
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://127.0.0.1/upload/a.png", SsrfPolicy.EMPTY))
             .isInstanceOf(WechatApiException.class)
             .hasMessageContaining("受限网络");
-        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://[::1]/a.png"))
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://[::1]/a.png", SsrfPolicy.EMPTY))
             .isInstanceOf(WechatApiException.class);
-        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://169.254.169.254/latest/meta-data"))
+        assertThatThrownBy(
+            () -> SsrfGuard.validateAndResolve("http://169.254.169.254/latest/meta-data", SsrfPolicy.EMPTY))
             .isInstanceOf(WechatApiException.class);
     }
 
     @Test
     void validateAndResolveAcceptsPublicLiteral() {
-        assertThat(SsrfGuard.validateAndResolve("http://93.184.216.34/a.png").getHost())
+        assertThat(SsrfGuard.validateAndResolve("http://93.184.216.34/a.png", SsrfPolicy.EMPTY).getHost())
             .isEqualTo("93.184.216.34");
+    }
+
+    @Test
+    void allowlistBySingleIpPermitsThatInternalTarget() {
+        // 内网 Halo 场景：管理员将自站内网 IP 加入白名单后，该地址得以放行
+        SsrfPolicy policy = SsrfPolicy.parse("192.168.1.20");
+        assertThat(SsrfGuard.validateAndResolve("http://192.168.1.20:8090/upload/a.png", policy).getHost())
+            .isEqualTo("192.168.1.20");
+        // 白名单仅放行指定目标，其余内网/元数据地址仍被拒绝
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://192.168.1.21/a.png", policy))
+            .isInstanceOf(WechatApiException.class);
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://169.254.169.254/x", policy))
+            .isInstanceOf(WechatApiException.class);
+    }
+
+    @Test
+    void allowlistByCidrPermitsWholeSegment() {
+        SsrfPolicy policy = SsrfPolicy.parse("10.0.0.0/8");
+        assertThat(SsrfGuard.validateAndResolve("http://10.1.2.3/a.png", policy).getHost()).isEqualTo("10.1.2.3");
+        // /8 之外的内网地址（192.168/16）不在本白名单，仍拒绝
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://192.168.0.1/a.png", policy))
+            .isInstanceOf(WechatApiException.class);
+    }
+
+    @Test
+    void allowlistByHostPermitsWithoutResolving() {
+        // 域名命中白名单时直接放行（不依赖真实 DNS），适用于内网域名自解析场景
+        SsrfPolicy policy = SsrfPolicy.parse("halo.internal\n*.example.com");
+        assertThat(policy.isHostAllowed("halo.internal")).isTrue();
+        assertThat(policy.isHostAllowed("HALO.INTERNAL")).isTrue();
+        assertThat(policy.isHostAllowed("img.example.com")).isTrue();
+        assertThat(policy.isHostAllowed("example.com")).isTrue();
+        assertThat(policy.isHostAllowed("evil.com")).isFalse();
+        assertThatThrownBy(() -> SsrfGuard.validateAndResolve("http://127.0.0.1/a.png", policy))
+            .isInstanceOf(WechatApiException.class);
     }
 }

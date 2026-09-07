@@ -38,6 +38,11 @@ spec:
           label: 开启评论
           value: false
           help: 同步生成的草稿是否开启评论
+        - $formkit: textarea
+          name: imageHostAllowlist
+          label: 图片下载白名单
+          help: 选填。默认拒绝下载内网/环回等受限地址的图片（防 SSRF）。内网部署导致同步失败时，可按行添加信任目标放行：域名、*.子域、IP 或 CIDR（如 192.168.0.0/16）。留空最安全。
+          value: ""
     - group: beautify
       label: 正文美化
       formSchema:

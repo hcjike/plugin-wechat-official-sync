@@ -77,6 +77,12 @@ public class WechatMpClient {
 
     private final AtomicReference<TokenCache> tokenCache = new AtomicReference<>();
 
+    /**
+     * 当前的图片下载内网白名单策略，由 {@code WechatSyncService} 在每次同步开始时根据插件设置下发。
+     * 属全局配置（对所有同步一致），预检与连接期解析器共享同一引用。默认为空白名单（不放行任何内网）。
+     */
+    private final AtomicReference<SsrfPolicy> ssrfPolicy = new AtomicReference<>(SsrfPolicy.EMPTY);
+
     public WechatMpClient() {
         this.webClient = WebClient.builder()
             .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_DOWNLOAD_BYTES))
@@ -84,8 +90,8 @@ public class WechatMpClient {
         HttpClient httpClient = HttpClient.create()
             // 禁止自动跟随重定向：避免公网地址 302 跳转到内网从而绕过校验
             .followRedirect(false)
-            // 连接期再次校验实际目标 IP，防止 DNS rebinding（预检与连接之间 DNS 结果变化）
-            .resolver(SsrfSafeAddressResolverGroup.INSTANCE)
+            // 连接期再次校验实际目标 IP（同时尊重白名单），防止 DNS rebinding
+            .resolver(new SsrfSafeAddressResolverGroup(ssrfPolicy::get))
             .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) DOWNLOAD_CONNECT_TIMEOUT.toMillis())
             .responseTimeout(DOWNLOAD_RESPONSE_TIMEOUT)
             .doOnConnected(connection -> connection
@@ -95,6 +101,15 @@ public class WechatMpClient {
             .clientConnector(new ReactorClientHttpConnector(httpClient))
             .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_DOWNLOAD_BYTES))
             .build();
+    }
+
+    /**
+     * 下发图片下载的内网白名单策略。由 {@code WechatSyncService} 在同步开始时根据插件设置解析后调用。
+     *
+     * @param policy 白名单策略，{@code null} 视为空白名单
+     */
+    public void setSsrfPolicy(SsrfPolicy policy) {
+        this.ssrfPolicy.set(policy == null ? SsrfPolicy.EMPTY : policy);
     }
 
     private record TokenCache(String appId, String token, long expireAt) {
@@ -167,12 +182,12 @@ public class WechatMpClient {
      * 下载远程资源字节，用于封面图和正文图片转存。
      *
      * <p>目标地址来自用户可控的封面与正文 HTML，属于典型 SSRF 面。此处为统一下载入口，先经
-     * {@link SsrfGuard#validateAndResolve(String)} 校验协议、主机与解析后的 IP（拒绝环回/内网/
-     * 链路本地/元数据等受限网段），再由专用 {@link #downloadWebClient} 在连接期二次校验实际目标 IP
-     * 并禁止重定向，两层防护共同阻断非预期的内网访问。</p>
+     * {@link SsrfGuard#validateAndResolve(String, SsrfPolicy)} 校验协议、主机与解析后的 IP（拒绝环回/内网/
+     * 链路本地/元数据等受限网段，仅放行命中内网白名单的目标），再由专用 {@link #downloadWebClient} 在连接期
+     * 二次校验实际目标 IP（同样尊重白名单）并禁止重定向，两层防护共同阻断非预期的内网访问。</p>
      */
     public Mono<byte[]> download(String url) {
-        return Mono.fromCallable(() -> SsrfGuard.validateAndResolve(url))
+        return Mono.fromCallable(() -> SsrfGuard.validateAndResolve(url, ssrfPolicy.get()))
             // getAllByName 为阻塞式 DNS 解析，切到 boundedElastic，不占用 Netty 事件循环
             .subscribeOn(Schedulers.boundedElastic())
             .flatMap(uri -> downloadWebClient.get()

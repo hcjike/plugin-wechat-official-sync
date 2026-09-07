@@ -15,7 +15,7 @@ import java.util.Locale;
  * <ol>
  *   <li>{@link #validateUrl(String)}：用 URI 解析器校验结构——仅允许 http/https，必须有主机名，
  *       禁止携带用户名/密码（userinfo）等易被用于绕过的结构；</li>
- *   <li>{@link #validateAndResolve(String)}：在结构校验之上解析目标主机的全部 IP，逐一拒绝受限网段；</li>
+ *   <li>{@link #validateAndResolve(String, SsrfPolicy)}：在结构校验之上解析目标主机的全部 IP，逐一拒绝受限网段，命中内网白名单的目标则放行；</li>
  *   <li>{@link #isBlockedAddress(InetAddress)}：判断单个 IP 是否为环回、私网、链路本地、组播、
  *       未指定地址或云平台元数据地址，供连接期的自定义解析器复用，防止 DNS rebinding 与重定向绕过。</li>
  * </ol>
@@ -71,16 +71,25 @@ final class SsrfGuard {
     /**
      * 结构校验 + 解析主机全部 IP 并拒绝受限网段。用于发起下载前的预检，给出清晰错误信息。
      *
+     * <p>命中 {@code policy} 白名单的目标（域名精确/通配，或 IP 落在允许的 CIDR 内）会被放行，
+     * 即便其指向内网/环回；未命中白名单的受限地址仍一律拒绝。白名单为空时等价于不放行任何内网地址。</p>
+     *
      * <p>{@link InetAddress#getAllByName(String)} 是阻塞式 DNS 解析，调用方须置于
      * {@code Schedulers.boundedElastic()} 上执行。</p>
      *
-     * @param url 待校验地址
+     * @param url    待校验地址
+     * @param policy 内网白名单策略，{@code null} 按空白名单处理
      * @return 校验通过的 {@link URI}
-     * @throws WechatApiException 结构非法、主机无法解析或命中受限网段时抛出
+     * @throws WechatApiException 结构非法、主机无法解析或命中受限网段且不在白名单时抛出
      */
-    static URI validateAndResolve(String url) {
+    static URI validateAndResolve(String url, SsrfPolicy policy) {
+        SsrfPolicy effective = policy == null ? SsrfPolicy.EMPTY : policy;
         URI uri = validateUrl(url);
         String host = uri.getHost();
+        // 管理员显式信任的主机（域名精确/通配）直接放行，无需再解析 IP
+        if (effective.isHostAllowed(host)) {
+            return uri;
+        }
         InetAddress[] addresses;
         try {
             addresses = InetAddress.getAllByName(host);
@@ -91,12 +100,27 @@ final class SsrfGuard {
             throw new WechatApiException("下载地址主机名未解析到任何 IP：" + host);
         }
         for (InetAddress address : addresses) {
-            if (isBlockedAddress(address)) {
+            if (isBlocked(address, effective)) {
                 throw new WechatApiException(
-                    "已拒绝下载：地址「" + host + "」指向环回、内网、链路本地或元数据等受限网络");
+                    "已拒绝下载：地址「" + host + "」指向环回、内网、链路本地或元数据等受限网络，"
+                        + "且不在插件设置的图片下载内网白名单中");
             }
         }
         return uri;
+    }
+
+    /**
+     * 结合白名单判定单个 IP 是否应被拒绝：命中受限网段<b>且</b>不在白名单 CIDR 内才拒绝。
+     *
+     * @param address 待判定 IP
+     * @param policy  内网白名单策略，{@code null} 按空白名单处理
+     */
+    static boolean isBlocked(InetAddress address, SsrfPolicy policy) {
+        if (!isBlockedAddress(address)) {
+            return false;
+        }
+        SsrfPolicy effective = policy == null ? SsrfPolicy.EMPTY : policy;
+        return !effective.isAddressAllowed(address);
     }
 
     /**
