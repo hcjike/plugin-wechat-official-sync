@@ -1,6 +1,7 @@
 package com.hcjike.wechatofficialsync;
 
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import org.jsoup.Jsoup;
@@ -14,6 +15,7 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
+import run.halo.app.extension.Secret;
 import run.halo.app.infra.ExternalUrlSupplier;
 import run.halo.app.infra.SystemSetting;
 
@@ -52,14 +54,60 @@ public class WechatSyncService {
         // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
         String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
         return resolveExternalBaseUrl()
-            .flatMap(baseUrl -> wechatMpClient.getAccessToken(setting)
-                .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
-                    .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
-                        request.getTitle(), thumbMediaId))
-                    .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
-                        .flatMap(content -> beautifyContent(content, beautify)
-                            .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
-                                buildArticle(request, setting, thumbMediaId, beautified)))))));
+            .flatMap(baseUrl -> resolveAppSecret(setting)
+                .flatMap(appSecret -> wechatMpClient.getAccessToken(apiBase, setting.getAppId(), appSecret)
+                    .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
+                        .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
+                            request.getTitle(), thumbMediaId))
+                        .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
+                            .flatMap(content -> beautifyContent(content, beautify)
+                                .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
+                                    buildArticle(request, setting, thumbMediaId, beautified))))))));
+    }
+
+    /**
+     * 按名称从 Halo {@code Secret} 中解析出 AppSecret 明文。
+     *
+     * <p>AppSecret 不保存在 Setting/ConfigMap，而是由用户在插件设置的 {@code secret} 组件写入 Halo
+     * {@code Secret} 资源，配置项仅保留 Secret 名称。此处按名称拉取 Secret 并取出约定的
+     * {@link WechatSetting#APP_SECRET_KEY} 键：Halo 读取 Secret 时只返回 {@code data}（base64 已解码为字节），
+     * {@code stringData} 通常为空，故优先取 {@code stringData}、回退 {@code data}。</p>
+     *
+     * <p><b>安全</b>：解析出的明文只在响应式链路中向下传递给获取 token 的调用，绝不写入日志、异常消息或
+     * 任何持久化位置；缺失或读取失败时以明确错误中断，不会以空值继续。</p>
+     */
+    private Mono<String> resolveAppSecret(WechatSetting setting) {
+        String secretName = setting.getAppSecretName();
+        if (secretName == null || secretName.isBlank()) {
+            return Mono.error(new WechatApiException("请先在插件设置中配置公众号 AppSecret"));
+        }
+        return client.fetch(Secret.class, secretName)
+            .switchIfEmpty(Mono.error(new WechatApiException(
+                "未找到保存 AppSecret 的 Secret「" + secretName + "」，请在插件设置中重新填写 AppSecret")))
+            .map(this::extractAppSecret)
+            .flatMap(secret -> (secret == null || secret.isBlank())
+                ? Mono.error(new WechatApiException("Secret「" + secretName + "」中未包含 AppSecret（键 "
+                    + WechatSetting.APP_SECRET_KEY + "），请在插件设置中重新配置"))
+                : Mono.just(secret));
+    }
+
+    /** 从 Secret 中取出 AppSecret：优先 {@code stringData}，回退 {@code data}（字节按 UTF-8 解码）。 */
+    private String extractAppSecret(Secret secret) {
+        Map<String, String> stringData = secret.getStringData();
+        if (stringData != null) {
+            String value = stringData.get(WechatSetting.APP_SECRET_KEY);
+            if (value != null && !value.isBlank()) {
+                return value;
+            }
+        }
+        Map<String, byte[]> data = secret.getData();
+        if (data != null) {
+            byte[] value = data.get(WechatSetting.APP_SECRET_KEY);
+            if (value != null && value.length > 0) {
+                return new String(value, StandardCharsets.UTF_8);
+            }
+        }
+        return null;
     }
 
     /**

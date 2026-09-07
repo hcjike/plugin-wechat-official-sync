@@ -12,11 +12,14 @@ spec:
           label: AppID
           help: 公众平台「设置与开发 - 基本配置」中的开发者 ID
           validation: required
-        - $formkit: password
-          name: appSecret
+        - $formkit: secret
+          name: appSecretName
           label: AppSecret
-          help: 公众平台的开发者密码
-          validation: required
+          descriptionPreset: 微信公众号开发者密码
+          requiredKeys:
+            - key: appSecret
+              help: 公众平台「设置与开发 - 基本配置」中的开发者密码（AppSecret）
+          help: AppSecret 由 Halo Secret 统一托管，此处仅保存 Secret 名称，不以明文写入插件配置
         - $formkit: text
           name: baseUrl
           label: 代理接口地址

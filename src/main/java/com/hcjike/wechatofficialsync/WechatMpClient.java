@@ -1,13 +1,18 @@
 package com.hcjike.wechatofficialsync;
 
 import com.twelvemonkeys.imageio.plugins.webp.WebPImageReaderSpi;
+import io.netty.channel.ChannelOption;
+import io.netty.handler.timeout.ReadTimeoutHandler;
+import io.netty.handler.timeout.WriteTimeoutHandler;
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -18,11 +23,14 @@ import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import reactor.netty.http.client.HttpClient;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.json.JsonMapper;
 
@@ -46,15 +54,46 @@ public class WechatMpClient {
     /** 微信图片素材支持的格式，其余（如 webp）需转换后再上传。 */
     private static final Set<String> WECHAT_IMAGE_EXTS = Set.of("jpg", "jpeg", "png", "gif", "bmp");
 
+    /** 下载图片的响应体上限，超出即中止，避免出站请求耗尽内存。 */
+    private static final int MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
+
+    /** 下载连接超时。 */
+    private static final Duration DOWNLOAD_CONNECT_TIMEOUT = Duration.ofSeconds(10);
+
+    /** 下载整体响应超时（含读写空闲）。 */
+    private static final Duration DOWNLOAD_RESPONSE_TIMEOUT = Duration.ofSeconds(30);
+
     private final ObjectMapper objectMapper = JsonMapper.builder().build();
 
     private final WebClient webClient;
+
+    /**
+     * 专用于下载封面 / 正文图片的客户端，与调用微信接口的 {@link #webClient} 分离。
+     *
+     * <p>下载目标来自用户可控的请求体与正文 HTML，故施加 SSRF 防护：禁止自动重定向、连接期经
+     * {@link SsrfSafeAddressResolverGroup} 过滤受限 IP、设置连接与响应超时并限制响应体大小。</p>
+     */
+    private final WebClient downloadWebClient;
 
     private final AtomicReference<TokenCache> tokenCache = new AtomicReference<>();
 
     public WechatMpClient() {
         this.webClient = WebClient.builder()
-            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(16 * 1024 * 1024))
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_DOWNLOAD_BYTES))
+            .build();
+        HttpClient httpClient = HttpClient.create()
+            // 禁止自动跟随重定向：避免公网地址 302 跳转到内网从而绕过校验
+            .followRedirect(false)
+            // 连接期再次校验实际目标 IP，防止 DNS rebinding（预检与连接之间 DNS 结果变化）
+            .resolver(SsrfSafeAddressResolverGroup.INSTANCE)
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) DOWNLOAD_CONNECT_TIMEOUT.toMillis())
+            .responseTimeout(DOWNLOAD_RESPONSE_TIMEOUT)
+            .doOnConnected(connection -> connection
+                .addHandlerLast(new ReadTimeoutHandler((int) DOWNLOAD_RESPONSE_TIMEOUT.toSeconds()))
+                .addHandlerLast(new WriteTimeoutHandler((int) DOWNLOAD_RESPONSE_TIMEOUT.toSeconds())));
+        this.downloadWebClient = WebClient.builder()
+            .clientConnector(new ReactorClientHttpConnector(httpClient))
+            .codecs(configurer -> configurer.defaultCodecs().maxInMemorySize(MAX_DOWNLOAD_BYTES))
             .build();
     }
 
@@ -91,20 +130,23 @@ public class WechatMpClient {
 
     /**
      * 获取（并缓存）公众号全局 access_token。
+     *
+     * @param apiBase    已规范化的微信接口基址
+     * @param appId      公众号 AppID
+     * @param appSecret  已从 Halo Secret 解析出的 AppSecret 明文（仅在内存中传递，不写日志/不落盘）
      */
-    public Mono<String> getAccessToken(WechatSetting setting) {
-        if (isBlank(setting.getAppId()) || isBlank(setting.getAppSecret())) {
+    public Mono<String> getAccessToken(String apiBase, String appId, String appSecret) {
+        if (isBlank(appId) || isBlank(appSecret)) {
             return Mono.error(new WechatApiException("请先在插件设置中配置公众号 AppID 与 AppSecret"));
         }
         long now = System.currentTimeMillis();
         TokenCache cache = tokenCache.get();
-        if (cache != null && cache.appId().equals(setting.getAppId()) && cache.expireAt() > now) {
+        if (cache != null && cache.appId().equals(appId) && cache.expireAt() > now) {
             return Mono.just(cache.token());
         }
-        String apiBase = resolveApiBase(setting.getBaseUrl());
         return webClient.get()
             .uri(apiBase + "/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}",
-                setting.getAppId(), setting.getAppSecret())
+                appId, appSecret)
             .retrieve()
             .bodyToMono(String.class)
             .defaultIfEmpty("")
@@ -113,7 +155,7 @@ public class WechatMpClient {
                 Object token = body.get("access_token");
                 if (token != null) {
                     long expiresIn = toLong(body.get("expires_in"), 7200L);
-                    tokenCache.set(new TokenCache(setting.getAppId(), token.toString(),
+                    tokenCache.set(new TokenCache(appId, token.toString(),
                         now + Math.max(expiresIn - 300, 60) * 1000));
                     return Mono.just(token.toString());
                 }
@@ -123,12 +165,24 @@ public class WechatMpClient {
 
     /**
      * 下载远程资源字节，用于封面图和正文图片转存。
+     *
+     * <p>目标地址来自用户可控的封面与正文 HTML，属于典型 SSRF 面。此处为统一下载入口，先经
+     * {@link SsrfGuard#validateAndResolve(String)} 校验协议、主机与解析后的 IP（拒绝环回/内网/
+     * 链路本地/元数据等受限网段），再由专用 {@link #downloadWebClient} 在连接期二次校验实际目标 IP
+     * 并禁止重定向，两层防护共同阻断非预期的内网访问。</p>
      */
     public Mono<byte[]> download(String url) {
-        return webClient.get()
-            .uri(url)
-            .retrieve()
-            .bodyToMono(byte[].class);
+        return Mono.fromCallable(() -> SsrfGuard.validateAndResolve(url))
+            // getAllByName 为阻塞式 DNS 解析，切到 boundedElastic，不占用 Netty 事件循环
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(uri -> downloadWebClient.get()
+                .uri(uri)
+                .retrieve()
+                // 已禁用自动重定向；若目标返回 3xx 则显式拒绝，不跟随到其他主机
+                .onStatus(HttpStatusCode::is3xxRedirection,
+                    response -> Mono.error(new WechatApiException(
+                        "已拒绝下载：目标发生重定向（" + SsrfGuard.describe(uri) + "），出于安全考虑不跟随")))
+                .bodyToMono(byte[].class));
     }
 
     /**
