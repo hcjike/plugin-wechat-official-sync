@@ -166,6 +166,23 @@ server {
 }
 ```
 
+**1Panel 反向代理示例**（适用于通过 1Panel 建站面板管理的服务器）：
+
+```nginx
+location ~ ^/cgi-bin/(token|media/uploadimg|material/add_material|draft/add)$ {
+    proxy_pass https://api.weixin.qq.com;
+    proxy_set_header Host api.weixin.qq.com;
+    proxy_ssl_server_name on;
+    proxy_ssl_name api.weixin.qq.com;
+    client_max_body_size 30m; # 素材上传可能较大，按需调整
+    proxy_request_buffering off;
+    proxy_read_timeout 120s;
+}
+```
+
+> 在 1Panel 中创建「反向代理」网站后，进入该网站的 **反向代理**，将上方整段 `location` 配置粘贴到源文文件中保存即可生效。
+
+
 要点：
 - `proxy_pass` 到 `https://` 上游时务必开启 `proxy_ssl_server_name on;`（SNI），否则与微信的 TLS 握手可能失败。
 - **保持路径原样转发**：`proxy_pass` 后不要带会改写路径的 URI 部分，让 nginx 原样透传 `/cgi-bin/...` 路径与查询参数。
