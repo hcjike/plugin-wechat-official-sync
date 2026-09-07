@@ -1,0 +1,107 @@
+name: Sync to Git (Mirror)
+
+permissions:
+  contents: write
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  push:
+    branches: [ main ]
+  pull_request_target:
+    branches: [ main ]
+    types: [ closed ]
+  workflow_dispatch:
+
+env:
+  GITEE_REPO: "https://${{ secrets.GITEE_USERNAME }}:${{ secrets.GITEE_TOKEN }}@gitee.com/hcjike/plugin-wechat-official-sync.git"
+  GITEA_REPO: "https://${{ secrets.GITEA_USERNAME }}:${{ secrets.GITEA_TOKEN }}@code.hcjike.com/hcjike/plugin-wechat-official-sync.git"
+
+jobs:
+  mirror:
+    if: |
+      github.event_name == 'schedule' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'push' ||
+      (github.event_name == 'pull_request_target' && 
+       github.event.pull_request.merged == true)
+
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout main branch
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Git config
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "github-actions@github.com"
+
+      - name: Push main to Gitee
+        run: |
+          echo "Pushing main branch to Gitee..."
+          
+          # 方法1: 直接强制推送
+          if git push ${{ env.GITEE_REPO }} main:main --force --no-verify; then
+            echo "✅ Main branch pushed to Gitee (method 1)"
+          
+          # 方法2: 如果失败，使用更彻底的方法
+          else
+            echo "Method 1 failed, trying alternative method..."
+          
+            # 创建临时 bare 仓库
+            TEMP_DIR=$(mktemp -d)
+            cd $TEMP_DIR
+          
+            # 克隆 bare 仓库
+            git clone --bare https://github.com/${{ github.repository }}.git .
+          
+            # 配置用户
+            git config user.name "GitHub Actions Bot"
+            git config user.email "github-actions@github.com"
+          
+            # 只推送 main 分支
+            git push ${{ env.GITEE_REPO }} +refs/heads/main:refs/heads/main --no-verify
+          
+            echo "✅ Main branch pushed to Gitee (alternative method)"
+          
+            # 清理
+            cd /
+            rm -rf $TEMP_DIR
+          fi
+
+      - name: Push main to Gitea
+        run: |
+          echo "Pushing main branch to Gitea..."
+          
+          # 方法1: 直接强制推送
+          if git push ${{ env.GITEA_REPO }} main:main --force; then
+            echo "✅ Main branch pushed to Gitea (method 1)"
+          
+          # 方法2: 如果失败，使用更彻底的方法
+          else
+            echo "Method 1 failed, trying alternative method..."
+          
+            # 创建临时 bare 仓库
+            TEMP_DIR=$(mktemp -d)
+            cd $TEMP_DIR
+          
+            # 克隆 bare 仓库
+            git clone --bare https://github.com/${{ github.repository }}.git .
+          
+            # 配置用户
+            git config user.name "GitHub Actions Bot"
+            git config user.email "github-actions@github.com"
+          
+            # 只推送 main 分支
+            git push ${{ env.GITEA_REPO }} +refs/heads/main:refs/heads/main
+          
+            echo "✅ Main branch pushed to Gitea (alternative method)"
+          
+            # 清理
+            cd /
+            rm -rf $TEMP_DIR
+          fi
