@@ -20,6 +20,10 @@ rules:
   - apiGroups: ["api.wechat-sync.halo.run"]
     resources: ["sync"]
     verbs: ["create"]
+  # 预览正文美化效果：POST /apis/api.wechat-sync.halo.run/v1alpha1/preview
+  - apiGroups: ["api.wechat-sync.halo.run"]
+    resources: ["preview"]
+    verbs: ["create"]
   # 查询同步状态：GET /apis/api.wechat-sync.halo.run/v1alpha1/status
   - apiGroups: ["api.wechat-sync.halo.run"]
     resources: ["status"]

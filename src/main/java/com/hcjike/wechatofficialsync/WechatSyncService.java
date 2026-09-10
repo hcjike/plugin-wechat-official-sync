@@ -81,6 +81,31 @@ public class WechatSyncService {
     }
 
     /**
+     * 构建「同步预览」：按与 {@link #submit} 一致的规则解析正文美化效果与草稿元信息，
+     * 但不做任何写操作——不下载/转存图片、不上传封面、不调用微信接口、不写同步记录。
+     *
+     * <p>返回的 {@code content}（美化后的正文）、{@code author}（草稿作者，设置的「默认作者」优先、
+     * 留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}（草稿「阅读原文」链接，
+     * 为空表示不会生成）与 {@code commentMode}（留言设置）即提交后实际写入草稿的值。</p>
+     */
+    public Mono<Map<String, Object>> preview(SyncRequest request, WechatSetting setting,
+        BeautifySetting beautify) {
+        // 预览允许在未配置公众号信息时使用：按空配置解析，作者回退文章作者、留言按关闭展示
+        WechatSetting cfg = setting == null ? new WechatSetting() : setting;
+        return resolveExternalBaseUrl()
+            .flatMap(baseUrl -> resolvePermalink(request)
+                .flatMap(permalink -> beautifyContent(request.getContent(), beautify)
+                    .map(html -> {
+                        Map<String, Object> result = new HashMap<>();
+                        result.put("content", html == null ? "" : html);
+                        result.put("author", firstNonBlank(cfg.getAuthor(), request.getAuthor()));
+                        result.put("sourceUrl", resolveSourceUrl(permalink, baseUrl));
+                        result.put("commentMode", resolveCommentMode(cfg));
+                        return result;
+                    })));
+    }
+
+    /**
      * 按名称从 Halo {@code Secret} 中解析出 AppSecret 明文。
      *
      * <p>AppSecret 不保存在 Setting/ConfigMap，而是由用户在插件设置的 {@code secret} 组件写入 Halo
