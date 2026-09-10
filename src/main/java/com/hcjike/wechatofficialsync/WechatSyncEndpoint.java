@@ -15,10 +15,12 @@ import run.halo.app.extension.GroupVersion;
 import run.halo.app.plugin.ReactiveSettingFetcher;
 
 /**
- * 同步接口。最终访问路径为
- * {@code POST /apis/api.wechat-sync.halo.run/v1alpha1/sync}。
+ * 同步相关接口。最终访问路径为
+ * {@code POST /apis/api.wechat-sync.halo.run/v1alpha1/sync}（提交同步）与
+ * {@code POST /apis/api.wechat-sync.halo.run/v1alpha1/preview}（预览美化效果与草稿元信息）。
  *
- * <p>接口收到请求后立即返回 {@code 202 Accepted}，实际同步在后台异步执行。</p>
+ * <p>提交同步的请求立即返回 {@code 202 Accepted}，实际同步在后台异步执行；
+ * 预览请求同步返回美化后的正文与上传后将使用的作者/原文链接/留言设置，不提交任何任务。</p>
  *
  * @author hcjike
  * @since 1.0.0
@@ -45,6 +47,7 @@ public class WechatSyncEndpoint implements CustomEndpoint {
     public RouterFunction<ServerResponse> endpoint() {
         return RouterFunctions.route()
             .POST("/sync", this::sync)
+            .POST("/preview", this::preview)
             .GET("/status", this::status)
             .build();
     }
@@ -75,6 +78,26 @@ public class WechatSyncEndpoint implements CustomEndpoint {
                                     "message", "请先在插件设置中配置 AppID / AppSecret")));
                     }));
             });
+    }
+
+    /**
+     * 预览接口：返回「提交后」的正文效果（美化后的内联样式 HTML）与草稿元信息
+     * （作者、原文链接、留言设置），供 Console 在确认同步前展示。
+     *
+     * <p>按与同步流程一致的规则解析（见 {@link WechatSyncService#preview}）：不校验公众号凭据、
+     * 不调用微信接口、不写同步记录；未配置公众号信息时也允许预览（作者回退文章作者、
+     * 留言按关闭展示），保证预览路径不被配置缺失阻断。</p>
+     */
+    private Mono<ServerResponse> preview(ServerRequest request) {
+        return request.bodyToMono(SyncRequest.class)
+            .flatMap(body -> settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
+                // 未配置公众号信息时用空配置，保证预览可用
+                .defaultIfEmpty(new WechatSetting())
+                .flatMap(setting -> settingFetcher.fetch(BeautifySetting.GROUP, BeautifySetting.class)
+                    // 未配置「正文美化」分组时用内置默认值，保证预览与真实同步的美化结果一致
+                    .defaultIfEmpty(new BeautifySetting())
+                    .flatMap(beautify -> syncService.preview(body, setting, beautify)
+                        .flatMap(result -> ServerResponse.ok().bodyValue(result)))));
     }
 
     /**

@@ -1,12 +1,22 @@
 package com.hcjike.wechatofficialsync;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
+import java.net.URI;
+import java.util.Map;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
+import run.halo.app.extension.ConfigMap;
+import run.halo.app.extension.ReactiveExtensionClient;
+import run.halo.app.infra.ExternalUrlSupplier;
+import run.halo.app.infra.SystemSetting;
 
 /**
- * {@link WechatSyncService#resolveSourceUrl} 与 {@link WechatSyncService#resolveCommentMode}
- * 的行为验证：原文链接始终按「外部访问地址 + 文章路由」拼接；留言设置按选项映射并兼容旧开关。
+ * {@link WechatSyncService} 的行为验证：原文链接始终按「外部访问地址 + 文章路由」拼接；留言设置按选项映射
+ * 并兼容旧开关；预览按与提交一致的规则解析（作者优先级 / 原文链接 / 留言设置 / 正文美化）。
  */
 class WechatSyncServiceTest {
 
@@ -69,5 +79,56 @@ class WechatSyncServiceTest {
         WechatSetting setting = new WechatSetting();
         setting.setCommentMode("mystery");
         assertThat(WechatSyncService.resolveCommentMode(setting)).isEqualTo(WechatSetting.COMMENT_MODE_CLOSE);
+    }
+
+    @Test
+    void previewResolvesDraftMetaWithSubmitRules() throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG)))
+            .thenReturn(Mono.empty());
+        ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
+        when(supplier.getRaw()).thenReturn(URI.create("https://blog.example.com/").toURL());
+        WechatSyncService previewService = new WechatSyncService(null, client, supplier);
+
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p>正文</p>");
+        request.setAuthor("文章作者");
+        request.setPermalink("/archives/hello");
+        WechatSetting setting = new WechatSetting();
+        setting.setAuthor("默认作者");
+        setting.setCommentMode(WechatSetting.COMMENT_MODE_FANS);
+
+        Map<String, Object> result = previewService.preview(request, setting, new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        // 正文已按美化规则处理（段落被注入内联样式）
+        assertThat((String) result.get("content")).contains("<p");
+        // 作者与提交一致：设置的「默认作者」优先
+        assertThat(result.get("author")).isEqualTo("默认作者");
+        assertThat(result.get("sourceUrl")).isEqualTo("https://blog.example.com/archives/hello");
+        assertThat(result.get("commentMode")).isEqualTo(WechatSetting.COMMENT_MODE_FANS);
+    }
+
+    @Test
+    void previewFallsBackWhenSettingIsNull() throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG)))
+            .thenReturn(Mono.empty());
+        // 外部访问地址未配置（ExternalUrlSupplier 返回 null），原文链接应为空
+        WechatSyncService previewService =
+            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p>正文</p>");
+        request.setAuthor("文章作者");
+        request.setPermalink("/archives/hello");
+
+        Map<String, Object> result = previewService.preview(request, null, new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        // 未配置公众号信息时：作者回退文章作者、留言按关闭展示
+        assertThat(result.get("author")).isEqualTo("文章作者");
+        assertThat(result.get("commentMode")).isEqualTo(WechatSetting.COMMENT_MODE_CLOSE);
+        assertThat(result.get("sourceUrl")).isEqualTo("");
     }
 }
