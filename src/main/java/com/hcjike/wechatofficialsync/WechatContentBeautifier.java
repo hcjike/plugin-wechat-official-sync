@@ -104,20 +104,21 @@ final class WechatContentBeautifier {
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
 
     /**
-     * 表格外层横向滚动容器：表格宽度以文章中设置的为准，若该宽度超出微信移动端屏宽，
-     * 容器 {@code overflow-x:auto} 让表格可横向滚动查看全貌，与代码块的横向拖拽观感一致。
+     * 表格外层横向滚动容器（兜底）：表格默认铺满微信屏宽（见 {@link #TABLE_STYLE}），仅当文章为表格/列宽
+     * 设置了超出屏宽的固定宽度时，{@code overflow-x:auto} 让表格可横向滚动查看全貌，与代码块的横向拖拽观感一致。
      */
     private static final String TABLE_SCROLL_WRAPPER =
         "margin:1em 0;overflow-x:auto;-webkit-overflow-scrolling:touch;";
 
     /**
-     * 表格本体：<b>不强制总宽度</b>，以文章中设置的为准（用户内联 {@code width} 因「默认在前、原有在后」
-     * 而优先生效，见 {@link #applyStyle}）。关键是补回 {@code table-layout:fixed}：Halo/TipTap 编辑器表格
-     * 本依赖它（来自样式表）但被微信剥离；固定布局下列宽严格按文章 {@code <colgroup>} 设定的每列宽度渲染，
-     * 单元格内容在列宽内自动换行；当各列宽之和超出屏幕时表格整体溢出，由外层容器横向滚动。
+     * 表格本体：默认 {@code width:100%} <b>铺满屏宽</b>（页面宽度自适应），与微信编辑器插入表格的观感一致；
+     * 若文章已为表格设置具体宽度，用户内联 {@code width} 因「默认在前、原有在后」而优先生效
+     * （见 {@link #applyStyle}）。同时补回 {@code table-layout:fixed}：Halo/TipTap 编辑器表格本依赖它
+     * （来自样式表）但被微信剥离；固定布局下列宽按文章 {@code <colgroup>} 设定的比例渲染，单元格内容在
+     * 列宽内自动换行；仅当文章设置了超出屏宽的固定列宽时表格才整体溢出，由外层容器横向滚动兜底。
      */
     private static final String TABLE_STYLE =
-        "border-collapse:collapse;font-size:15px;table-layout:fixed;";
+        "border-collapse:collapse;width:100%;font-size:15px;table-layout:fixed;";
 
     /**
      * 单元格换行策略：固定布局下列宽已由 {@code <colgroup>} 确定，内容自然在列内换行；仅需
@@ -126,9 +127,12 @@ final class WechatContentBeautifier {
      */
     private static final String CELL_WRAP = "word-break:break-word;overflow-wrap:break-word;";
 
+    /**
+     * 表头单元格：对齐微信编辑器原生表格的观感——1px 浅灰细边框、紧凑内边距、左对齐且加粗、<b>无底色</b>
+     * （微信编辑器插入表格的表头默认不带背景色）。
+     */
     private static final String TH_STYLE =
-        "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;background:#f6f8fa;font-weight:bold;"
-            + "color:#333333;" + CELL_WRAP;
+        "border:1px solid #e6e6e6;padding:8px;text-align:left;font-weight:bold;color:#333333;" + CELL_WRAP;
 
     private static final String HR_STYLE = "border:none;border-top:1px solid #eaeaea;margin:1.6em 0;";
 
@@ -525,9 +529,9 @@ final class WechatContentBeautifier {
      * 把每个 {@code <table>} 包进一个横向滚动的 {@code <section>} 容器，并移除 Halo/TipTap 编辑器的
      * {@code <div class="tableWrapper">} 多余包裹层。
      *
-     * <p>表格 {@code table-layout:fixed}（见 {@link #TABLE_STYLE}）使列宽严格按文章设定的每列宽度渲染、
-     * 单元格内容在列内自动换行；当各列宽之和超出屏幕时，表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动
-     * 查看全貌。</p>
+     * <p>表格默认 {@code width:100%} 铺满屏宽、{@code table-layout:fixed}（见 {@link #TABLE_STYLE}）按文章
+     * {@code <colgroup>} 设定的比例渲染列宽，单元格内容在列内自动换行；仅当文章设置了超出屏宽的固定宽度时，
+     * 表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动兜底查看全貌。</p>
      *
      * <p>Halo/TipTap 编辑器输出的表格通常被 {@code <div class="tableWrapper">} 包裹，该 div 在微信中无实际
      * 作用（class 会被剥离），且多层嵌套会触发微信编辑器重构 DOM、在表格前后插入空段落（表现为发布后
@@ -651,8 +655,9 @@ final class WechatContentBeautifier {
         return "margin:0.35em 0;line-height:1.75;font-size:16px;color:" + textColor + ";";
     }
 
+    /** 单元格：与 {@link #TH_STYLE} 同款微信原生观感——浅灰细边框、紧凑内边距、左对齐。 */
     private static String tdStyle(String textColor) {
-        return "border:1px solid #dfe2e5;padding:8px 12px;text-align:left;color:" + textColor + ";" + CELL_WRAP;
+        return "border:1px solid #e6e6e6;padding:8px;text-align:left;color:" + textColor + ";" + CELL_WRAP;
     }
 
     private static String aStyle(String linkColor) {
