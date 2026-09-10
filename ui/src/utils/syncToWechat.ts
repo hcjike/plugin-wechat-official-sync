@@ -19,6 +19,8 @@ async function submitSync(post: ListedPost) {
     content,
     cover: post.post.spec?.cover || '',
     author: post.owner?.displayName || '',
+    // 文章路由（如 /archives/xxx），服务端与站点「外部访问地址」拼为草稿「原文链接」
+    permalink: post.post.status?.permalink || '',
   })
   // 立即在列表状态列标记为「同步中」，随后延时刷新以捕获异步的最终结果
   setLocalRecord(postName, {

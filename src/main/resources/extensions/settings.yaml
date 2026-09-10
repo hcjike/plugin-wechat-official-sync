@@ -30,14 +30,19 @@ spec:
           label: 默认作者
           help: 同步到公众号时展示的作者名，留空则使用文章作者
           value: ""
-        - $formkit: switch
-          onValue: true
-          offValue: false
-          name: openComment
-          id: openComment
-          label: 开启评论
-          value: false
-          help: 同步生成的草稿是否开启评论
+        - $formkit: select
+          name: commentMode
+          id: commentMode
+          label: 留言设置
+          value: "close"
+          options:
+            - value: "close"
+              label: 关闭留言
+            - value: "all"
+              label: 所有人可留言
+            - value: "fans"
+              label: 已关注的人可留言
+          help: 同步生成的草稿的留言权限；「已关注 7 天及以上」仅支持在公众号后台设置
         - $formkit: textarea
           name: imageHostAllowlist
           label: 图片下载白名单
