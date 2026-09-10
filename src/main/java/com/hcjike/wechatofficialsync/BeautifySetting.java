@@ -29,9 +29,6 @@ public class BeautifySetting {
     /** 行内代码底色。 */
     private String inlineCodeBgColor = "#f2f3f5";
 
-    /** 代码块主题：{@code light}（浅色，微信原生观感）或 {@code dark}（深色）。默认浅色。 */
-    private String codeBlockTheme = "light";
-
     /** 引用块左侧强调边框颜色（十六进制）。默认微信绿。 */
     private String themeColor = "#07c160";
 

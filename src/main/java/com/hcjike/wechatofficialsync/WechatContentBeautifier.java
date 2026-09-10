@@ -10,7 +10,6 @@ import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
-import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -78,30 +77,24 @@ final class WechatContentBeautifier {
     private static final Pattern HEX_COLOR =
         Pattern.compile("#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})");
 
-    /** 代码块统一等宽字体栈。 */
-    private static final String CODE_FONT =
-        "font-family:Consolas,'Liberation Mono',Menlo,Courier,monospace;";
-
     /** 引用块内的段落：收紧上下间距，避免与引用块自身的内边距叠加。 */
     private static final String QUOTE_P_STYLE =
         "margin:0.3em 0;line-height:1.7;font-size:15px;color:#666666;";
 
     /**
-     * 代码块（浅色）：对齐微信后台「插入代码」的原生观感——浅灰底 + 极细内阴影边框（而非实线
-     * border）+ 小圆角；{@code overflow-x:auto} + {@code white-space:pre} 让长行不折行、发布后可横向
-     * 拖拽，缩进原样保留。
+     * 微信原生代码块外层容器类名：{@code __fix} 提供「行号列 + 代码区」布局，{@code __js} 标记
+     * 交由微信脚本按 {@code data-lang} 重新高亮，两者均命中微信公众平台文章加载的全局样式。
      */
-    private static final String CODE_BLOCK_LIGHT =
-        "margin:1em 0;overflow-x:auto;padding:10px 12px;background-color:#f8f8f8;"
-            + "box-shadow:rgba(216,216,216,0.5) 0 0 0 1px inset;border-radius:3px;"
-            + "font-size:14px;line-height:1.6;text-align:left;color:#333333;white-space:pre;"
-            + "word-wrap:normal;" + CODE_FONT;
+    private static final String CODE_SNIPPET_FIX_CLASS = "code-snippet__fix";
 
-    /** 代码块（深色）：One Dark 观感，深底浅字，适合技术类公众号。 */
-    private static final String CODE_BLOCK_DARK =
-        "margin:1em 0;overflow-x:auto;padding:12px 15px;background-color:#282c34;border-radius:5px;"
-            + "font-size:14px;line-height:1.6;text-align:left;color:#abb2bf;white-space:pre;"
-            + "word-wrap:normal;" + CODE_FONT;
+    /** 微信原生代码块类名：外层容器、行号列与代码区 {@code <pre>} 共用。 */
+    private static final String CODE_SNIPPET_CLASS = "code-snippet__js";
+
+    /** 微信原生代码块行号列类名：每个代码行对应一个空 {@code <li>}，序号由微信 CSS 计数器自增渲染。 */
+    private static final String CODE_SNIPPET_LINE_INDEX_CLASS = "code-snippet__line-index";
+
+    /** 空代码行的占位符（零宽空格）：保证空行高度不塌陷，使行号与代码行严格一一对应。 */
+    private static final String EMPTY_CODE_LINE = "\u200b";
 
     private static final String UL_STYLE = "margin:0.9em 0;padding-left:1.6em;list-style:disc;";
 
@@ -155,7 +148,7 @@ final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框色、标题边框开关与 H2–H6 逐级边框色、代码块主题、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     static String beautify(String html, BeautifySetting config) {
@@ -179,8 +172,9 @@ final class WechatContentBeautifier {
         normalizeBlockWrappers(body);
         // 删除 TipTap/ProseMirror 在表格等块前后遗留的空段落（否则微信里渲染成多余空行）
         removeEmptyParagraphs(body);
-        // 代码块重建须在通用样式注入前：重建后 <pre> 已不存在，剩余 <code> 即行内代码
-        buildCodeBlocks(body, cfg);
+        // 代码块重建须在通用样式注入前：重建为微信原生 code-snippet 结构（行号列 + 逐行 code 的 pre），
+        // 通用样式注入会跳过该结构，结构外剩余 <code> 即行内代码
+        buildCodeBlocks(body);
         // 表格包裹须在通用样式注入前：外层滚动容器就位后，table/th/td 样式仍按标签名注入
         buildTables(body);
         injectStyles(body, cfg);
@@ -416,7 +410,10 @@ final class WechatContentBeautifier {
         return true;
     }
 
-    /** 按标签名注入内联样式（代码块已在 {@link #buildCodeBlocks} 单独重建，此处不再处理 pre）。 */
+    /**
+     * 按标签名注入内联样式。微信原生代码块（{@link #buildCodeBlocks} 重建）的行号列 {@code <ul>/<li>} 与
+     * 代码行 {@code <code>} 须跳过，否则通用列表/行内代码样式会破坏微信自身的行号计数与代码行排版。
+     */
     private static void injectStyles(Element body, BeautifySetting cfg) {
         String accent = color(cfg.getThemeColor(), DEFAULT_ACCENT);
         String textColor = color(cfg.getTextColor(), DEFAULT_TEXT_COLOR);
@@ -443,9 +440,9 @@ final class WechatContentBeautifier {
             color(cfg.getH6Color(), DEFAULT_HEADING_COLORS[5]),
             headingBorderCss(headingBorder, cfg.getH6BorderColor())));
         applyAll(body, "blockquote", blockquoteStyle(accent));
-        applyAll(body, "ul", UL_STYLE);
+        applyAllSkippingCodeBlocks(body, "ul", UL_STYLE);
         applyAll(body, "ol", OL_STYLE);
-        applyAll(body, "li", liStyle(textColor));
+        applyAllSkippingCodeBlocks(body, "li", liStyle(textColor));
         applyAll(body, "img", IMG_STYLE);
         applyAll(body, "table", TABLE_STYLE);
         applyAll(body, "th", TH_STYLE);
@@ -453,8 +450,8 @@ final class WechatContentBeautifier {
         applyAll(body, "hr", HR_STYLE);
         applyAll(body, "a", aStyle(linkColor));
         applyAll(body, "figcaption", FIGCAPTION_STYLE);
-        // 代码块已重建为 section，剩余 <code> 均为行内代码
-        applyAll(body, "code", inlineCodeStyle(inlineCodeColor, inlineCodeBgColor));
+        // 代码块内的代码行由微信自身样式接管，跳过；其余 <code> 均为行内代码
+        applyAllSkippingCodeBlocks(body, "code", inlineCodeStyle(inlineCodeColor, inlineCodeBgColor));
 
         // 段落：表格单元格内、引用块内、普通正文的间距不同，分别处理，避免二次注入导致样式顺序错乱
         for (Element p : body.select("p")) {
@@ -484,28 +481,43 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 把每个 {@code <pre>} 重建为微信原生风格的单栏代码块（不加行号）。
+     * 把每个 {@code <pre>} 重建为微信编辑器原生代码块结构（{@code code-snippet}）：外层
+     * {@code code-snippet__fix} 容器内，行号列 {@code <ul class="code-snippet__line-index">}（每个代码行一个
+     * 空 {@code <li>}）在前、代码区 {@code <pre class="code-snippet__js" data-lang="…">}（每个代码行一个
+     * {@code <code>}）在后，与微信编辑器「插入代码」产出的标记一致。
      *
-     * <p>微信只保留内联样式，代码文本用 {@link Element#wholeText()} 原样取出（保留缩进与换行），
-     * 按行拆分后逐行写入并以 {@code <br>} 断行；容器 {@code overflow-x:auto} + {@code white-space:pre}
-     * 让长行不折行、发布后可横向拖拽。</p>
+     * <p>行号由微信自身样式渲染：{@code <li>} 序号走 CSS 计数器，删行时行号自动减少，无需维护数字；
+     * 代码行由微信样式 {@code white-space:pre} 不折行，长行不换行、行号与代码行严格对应。代码取纯文本
+     * 重建并写入 {@code data-lang}，微信编辑器会按语言重新高亮。空行以零宽空格占位防行高塌陷。</p>
      */
-    private static void buildCodeBlocks(Element body, BeautifySetting cfg) {
-        boolean dark = isDarkCode(cfg.getCodeBlockTheme());
-        String blockStyle = dark ? CODE_BLOCK_DARK : CODE_BLOCK_LIGHT;
+    private static void buildCodeBlocks(Element body) {
         for (Element pre : body.select("pre")) {
             List<String> lines = extractCodeLines(pre);
-            Element block = new Element(Tag.valueOf("section"), "");
-            block.attr("style", blockStyle);
-            for (int i = 0; i < lines.size(); i++) {
-                if (i > 0) {
-                    block.appendChild(new Element(Tag.valueOf("br"), ""));
-                }
-                if (!lines.get(i).isEmpty()) {
-                    block.appendChild(new TextNode(lines.get(i)));
-                }
+            String language = extractCodeLanguage(pre);
+
+            Element wrapper = new Element(Tag.valueOf("section"), "");
+            wrapper.addClass(CODE_SNIPPET_FIX_CLASS).addClass(CODE_SNIPPET_CLASS);
+
+            Element lineIndex = new Element(Tag.valueOf("ul"), "");
+            lineIndex.addClass(CODE_SNIPPET_LINE_INDEX_CLASS).addClass(CODE_SNIPPET_CLASS);
+            wrapper.appendChild(lineIndex);
+
+            Element codePre = new Element(Tag.valueOf("pre"), "");
+            codePre.addClass(CODE_SNIPPET_CLASS);
+            if (language != null) {
+                codePre.attr("data-lang", language);
             }
-            pre.replaceWith(block);
+            wrapper.appendChild(codePre);
+
+            for (String line : lines) {
+                lineIndex.appendChild(new Element(Tag.valueOf("li"), ""));
+                Element codeLine = new Element(Tag.valueOf("code"), "");
+                Element span = new Element(Tag.valueOf("span"), "");
+                span.text(line.isEmpty() ? EMPTY_CODE_LINE : line);
+                codeLine.appendChild(span);
+                codePre.appendChild(codeLine);
+            }
+            pre.replaceWith(wrapper);
         }
     }
 
@@ -559,6 +571,40 @@ final class WechatContentBeautifier {
             lines.add("");
         }
         return lines;
+    }
+
+    /**
+     * 提取代码块语言标识，写入 {@code pre} 的 {@code data-lang} 供微信重新高亮：
+     * 先看 {@code <pre>} 自身、再看其内部首个 {@code <code>} 的 class（{@code language-*} / {@code lang-*}）；
+     * 取不到时返回 {@code null}，代码块结构照常渲染、仅无高亮。
+     */
+    private static String extractCodeLanguage(Element pre) {
+        String language = languageFromClass(pre.attr("class"));
+        if (language != null) {
+            return language;
+        }
+        Element code = pre.selectFirst("code");
+        return code == null ? null : languageFromClass(code.attr("class"));
+    }
+
+    /** 从 class 属性解析 {@code language-*} / {@code lang-*} 语言标识（统一小写）；无则返回 {@code null}。 */
+    private static String languageFromClass(String classAttribute) {
+        if (classAttribute == null || classAttribute.isBlank()) {
+            return null;
+        }
+        for (String token : classAttribute.trim().split("\\s+")) {
+            String lower = token.toLowerCase(java.util.Locale.ROOT);
+            String language = null;
+            if (lower.startsWith("language-")) {
+                language = lower.substring("language-".length());
+            } else if (lower.startsWith("lang-")) {
+                language = lower.substring("lang-".length());
+            }
+            if (language != null && !language.isEmpty()) {
+                return language;
+            }
+        }
+        return null;
     }
 
     /**
@@ -633,14 +679,18 @@ final class WechatContentBeautifier {
         return HEX_COLOR.matcher(trimmed).matches() ? trimmed : fallback;
     }
 
-    /** 代码块是否用深色主题（仅当显式配置为 {@code dark}）。 */
-    private static boolean isDarkCode(String codeBlockTheme) {
-        return codeBlockTheme != null && "dark".equalsIgnoreCase(codeBlockTheme.trim());
-    }
-
     private static void applyAll(Element body, String cssQuery, String style) {
         for (Element element : body.select(cssQuery)) {
             applyStyle(element, style);
+        }
+    }
+
+    /** 同 {@link #applyAll}，但跳过微信原生代码块结构内的元素（行号列与代码行由微信样式接管）。 */
+    private static void applyAllSkippingCodeBlocks(Element body, String cssQuery, String style) {
+        for (Element element : body.select(cssQuery)) {
+            if (!isInsideWechatCodeBlock(element)) {
+                applyStyle(element, style);
+            }
         }
     }
 
@@ -665,6 +715,18 @@ final class WechatContentBeautifier {
                 return true;
             }
             parent = parent.parent();
+        }
+        return false;
+    }
+
+    /** 判断元素是否位于微信原生代码块（code-snippet）结构内。 */
+    private static boolean isInsideWechatCodeBlock(Element element) {
+        Element current = element;
+        while (current != null) {
+            if (current.hasClass(CODE_SNIPPET_FIX_CLASS) || current.hasClass(CODE_SNIPPET_CLASS)) {
+                return true;
+            }
+            current = current.parent();
         }
         return false;
     }

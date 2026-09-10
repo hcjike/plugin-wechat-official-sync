@@ -70,17 +70,6 @@ spec:
           help: 行内 code 的背景色
           value: "#f2f3f5"
           validation: required
-        - $formkit: radio
-          name: codeBlockTheme
-          label: 代码块主题
-          help: 代码块配色；两种风格均对齐微信原生，长行发布后支持横向拖拽
-          value: light
-          validation: required
-          options:
-            - label: 浅色（微信原生）
-              value: light
-            - label: 深色
-              value: dark
         - $formkit: color
           name: themeColor
           label: 引用块边框颜色
