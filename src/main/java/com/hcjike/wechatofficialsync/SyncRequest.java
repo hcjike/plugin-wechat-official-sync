@@ -28,4 +28,10 @@ public class SyncRequest {
     private String cover;
 
     private String author;
+
+    /**
+     * 文章在站点上的路由地址（Halo {@code status.permalink}，如 {@code /archives/xxx}），
+     * 用于与站点「外部访问地址」拼成草稿的「原文链接」（阅读原文）。
+     */
+    private String permalink;
 }

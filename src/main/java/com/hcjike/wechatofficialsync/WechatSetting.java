@@ -19,6 +19,15 @@ public class WechatSetting {
      */
     public static final String APP_SECRET_KEY = "appSecret";
 
+    /** 留言设置：关闭留言。 */
+    public static final String COMMENT_MODE_CLOSE = "close";
+
+    /** 留言设置：开启留言，所有人可留言。 */
+    public static final String COMMENT_MODE_ALL = "all";
+
+    /** 留言设置：开启留言，已关注的人（粉丝）可留言。 */
+    public static final String COMMENT_MODE_FANS = "fans";
+
     private String appId;
 
     /**
@@ -38,7 +47,18 @@ public class WechatSetting {
 
     private String author;
 
-    private boolean openComment;
+    /**
+     * 草稿的留言设置，取值 {@link #COMMENT_MODE_CLOSE} / {@link #COMMENT_MODE_ALL} /
+     * {@link #COMMENT_MODE_FANS}，对应微信 draft/add 的 {@code need_open_comment} 与
+     * {@code only_fans_can_comment}。
+     */
+    private String commentMode;
+
+    /**
+     * 已废弃：旧版「开启评论」开关。仅为兼容升级前已保存的配置（{@code true} 等价于
+     * {@link #COMMENT_MODE_ALL}），新表单不再写入该字段。
+     */
+    private Boolean openComment;
 
     /**
      * 图片下载的内网白名单（多行文本，每行一个域名/IP/CIDR）。

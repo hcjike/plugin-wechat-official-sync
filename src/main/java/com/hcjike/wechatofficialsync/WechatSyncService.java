@@ -13,6 +13,7 @@ import org.springframework.stereotype.Service;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
+import run.halo.app.core.extension.content.Post;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
 import run.halo.app.extension.Secret;
@@ -59,15 +60,24 @@ public class WechatSyncService {
             .subscribeOn(Schedulers.boundedElastic())
             .doOnNext(wechatMpClient::setSsrfPolicy)
             .then(Mono.defer(() -> resolveExternalBaseUrl()
-                .flatMap(baseUrl -> resolveAppSecret(setting)
-                    .flatMap(appSecret -> wechatMpClient.getAccessToken(apiBase, setting.getAppId(), appSecret)
-                        .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
-                            .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
-                                request.getTitle(), thumbMediaId))
-                            .flatMap(thumbMediaId -> transferImages(apiBase, token, request.getContent(), baseUrl)
-                                .flatMap(content -> beautifyContent(content, beautify)
-                                    .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
-                                        buildArticle(request, setting, thumbMediaId, beautified))))))))));
+                .flatMap(baseUrl -> resolvePermalink(request)
+                    .flatMap(permalink -> {
+                        // 原文链接（「阅读原文」）：外部访问地址 + 文章路由；无法解析时为空（不显示阅读原文）
+                        String sourceUrl = resolveSourceUrl(permalink, baseUrl);
+                        logSourceUrl(request, permalink, baseUrl, sourceUrl);
+                        return resolveAppSecret(setting)
+                            .flatMap(appSecret -> wechatMpClient
+                                .getAccessToken(apiBase, setting.getAppId(), appSecret)
+                                .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
+                                    .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
+                                        request.getTitle(), thumbMediaId))
+                                    .flatMap(thumbMediaId ->
+                                        transferImages(apiBase, token, request.getContent(), baseUrl)
+                                            .flatMap(content -> beautifyContent(content, beautify)
+                                                .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
+                                                    buildArticle(request, setting, thumbMediaId, beautified,
+                                                        sourceUrl)))))));
+                    }))));
     }
 
     /**
@@ -128,20 +138,91 @@ public class WechatSyncService {
     }
 
     private Map<String, Object> buildArticle(SyncRequest request, WechatSetting setting, String thumbMediaId,
-        String content) {
+        String content, String sourceUrl) {
         Map<String, Object> article = new HashMap<>();
         article.put("title", request.getTitle() == null ? "" : request.getTitle());
         // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
         article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
         article.put("digest", request.getDigest() == null ? "" : request.getDigest());
         article.put("content", content);
-        article.put("content_source_url", "");
-        article.put("need_open_comment", setting.isOpenComment() ? 1 : 0);
-        article.put("only_fans_can_comment", 0);
+        // 原文链接：图文底部的「阅读原文」；为空时微信不显示该入口
+        article.put("content_source_url", sourceUrl == null ? "" : sourceUrl);
+        // 留言设置：关闭时不开启评论；开启时按「所有人 / 已关注的人」映射 only_fans_can_comment
+        String commentMode = resolveCommentMode(setting);
+        article.put("need_open_comment", WechatSetting.COMMENT_MODE_CLOSE.equals(commentMode) ? 0 : 1);
+        article.put("only_fans_can_comment", WechatSetting.COMMENT_MODE_FANS.equals(commentMode) ? 1 : 0);
         if (!thumbMediaId.isBlank()) {
             article.put("thumb_media_id", thumbMediaId);
         }
         return article;
+    }
+
+    /**
+     * 解析草稿的「原文链接」（{@code content_source_url}，即图文底部的「阅读原文」）：
+     * 站点「外部访问地址」+ 文章路由（{@code status.permalink}，如 {@code /archives/xxx}）。
+     *
+     * <p>始终自动拼接，无需人工配置；路由缺失、外部访问地址未配置，或路由本身已是绝对地址
+     * （Halo 配置了绝对地址策略时）均由 {@link #resolveUrl} 兜底：无法拼接时返回空串，
+     * 草稿不显示「阅读原文」。</p>
+     */
+    String resolveSourceUrl(String permalink, String baseUrl) {
+        String url = resolveUrl(permalink, baseUrl);
+        return url == null ? "" : url;
+    }
+
+    /**
+     * 解析文章的站点路由（{@code status.permalink}，如 {@code /archives/xxx}）：
+     * 优先使用前端上送的值（取自 Console 文章列表数据）；缺失时按 {@code postName} 回查
+     * Halo {@code Post} 扩展兜底（兼容前端未上送或列表中该字段为空的情况）；都拿不到时返回空串。
+     */
+    private Mono<String> resolvePermalink(SyncRequest request) {
+        String permalink = request.getPermalink();
+        if (permalink != null && !permalink.isBlank()) {
+            return Mono.just(permalink);
+        }
+        String postName = request.getPostName();
+        if (postName == null || postName.isBlank()) {
+            return Mono.just("");
+        }
+        return client.fetch(Post.class, postName)
+            .map(post -> post.getStatus() == null || post.getStatus().getPermalink() == null
+                ? "" : post.getStatus().getPermalink())
+            .defaultIfEmpty("")
+            .onErrorResume(e -> {
+                log.warn("读取文章 {} 的 permalink 失败：{}", postName, e.getMessage());
+                return Mono.just("");
+            });
+    }
+
+    /**
+     * 记录原文链接解析结果，便于排查「草稿未带阅读原文」类问题；
+     * 路由存在但站点未配置「外部访问地址」时给出明确告警（此时无法拼出绝对地址）。
+     */
+    private void logSourceUrl(SyncRequest request, String permalink, String baseUrl, String sourceUrl) {
+        if (sourceUrl.isBlank() && !permalink.isBlank() && baseUrl.isBlank()) {
+            log.warn("文章《{}》的原文链接无法生成：未在 Halo「基本设置」中配置「外部访问地址」（文章路由 {}）",
+                request.getTitle(), permalink);
+            return;
+        }
+        log.info("文章《{}》原文链接解析：permalink={}，baseUrl={}，content_source_url={}",
+            request.getTitle(), permalink, baseUrl, sourceUrl.isBlank() ? "（空）" : sourceUrl);
+    }
+
+    /**
+     * 解析草稿的留言设置：{@link WechatSetting#COMMENT_MODE_CLOSE} / {@link WechatSetting#COMMENT_MODE_ALL}
+     * / {@link WechatSetting#COMMENT_MODE_FANS}。
+     *
+     * <p>未保存过该项或取值非法时按旧版「开启评论」开关兼容：{@code openComment=true}
+     * 等价于所有人可留言，其余按关闭处理。</p>
+     */
+    static String resolveCommentMode(WechatSetting setting) {
+        String mode = setting.getCommentMode();
+        if (WechatSetting.COMMENT_MODE_CLOSE.equals(mode) || WechatSetting.COMMENT_MODE_ALL.equals(mode)
+            || WechatSetting.COMMENT_MODE_FANS.equals(mode)) {
+            return mode;
+        }
+        return Boolean.TRUE.equals(setting.getOpenComment())
+            ? WechatSetting.COMMENT_MODE_ALL : WechatSetting.COMMENT_MODE_CLOSE;
     }
 
     /**
