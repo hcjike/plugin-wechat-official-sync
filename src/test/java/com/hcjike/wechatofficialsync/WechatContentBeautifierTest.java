@@ -6,7 +6,7 @@ import org.junit.jupiter.api.Test;
 
 /**
  * {@link WechatContentBeautifier} 的行为验证：内联样式注入、用户样式优先、标题颜色可配、
- * 代码块横向拖拽、根节点包裹与安全清理。
+ * 代码块微信原生结构重建、根节点包裹与安全清理。
  */
 class WechatContentBeautifierTest {
 
@@ -77,30 +77,37 @@ class WechatContentBeautifierTest {
 
     @Test
     void codeBlockMatchesWechatNativeStyle() {
-        String html = "<pre><code>int a = 1;</code></pre>";
+        String html = "<pre><code class=\"language-java\">int a = 1;</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);
 
-        // 微信原生代码块：极细内阴影边框 + 浅灰底 + 小圆角 + Consolas 优先等宽字体
-        assertThat(result).contains("box-shadow:rgba(216,216,216,0.5) 0 0 0 1px inset");
-        assertThat(result).contains("background-color:#f8f8f8");
-        assertThat(result).contains("border-radius:3px");
-        assertThat(result).contains("font-family:Consolas");
+        // 与微信编辑器「插入代码」一致的标记：外层 code-snippet 容器内，行号列在前、代码区在后
+        assertThat(result).contains("<section class=\"code-snippet__fix code-snippet__js\">");
+        assertThat(result).contains("<ul class=\"code-snippet__line-index code-snippet__js\">");
+        assertThat(result).contains("<pre class=\"code-snippet__js\" data-lang=\"java\">");
+        // 每个代码行：行号列一个空 <li>，代码区一个 <code>（内容包在 <span> 中）
+        assertThat(result).contains("<li></li>");
+        assertThat(result).contains("<code><span>int a = 1;</span></code>");
+        // 代码块内不注入行内代码样式，排版交给微信自身
+        assertThat(result).doesNotContain("background:#f2f3f5");
     }
 
     @Test
-    void codeBlockHasHorizontalScroll() {
+    void codeBlockLinesMatchLineIndexCount() {
         String html = "<pre><code>line1\nline2\nline3</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);
 
-        // 代码换行转为 <br>，不加行号
-        assertThat(result).contains("line1<br>line2<br>line3");
-        // 单栏容器横向拖拽
-        assertThat(result).contains("overflow-x:auto");
-        // 不再使用两栏 flex 布局，也无行号文本
-        assertThat(result).doesNotContain("display:flex");
-        assertThat(result).doesNotContain("1<br>2<br>3");
-        // 原 <pre> 已被重建，不再残留
-        assertThat(result).doesNotContain("<pre");
+        // 行号列与代码行一一对应：每个代码行一个空 <li>、一个 <code>，数量严格一致
+        assertThat(result.split("<li></li>", -1).length - 1).isEqualTo(3);
+        assertThat(result.split("<code><span>", -1).length - 1).isEqualTo(3);
+        assertThat(result).contains("<code><span>line1</span></code>"
+            + "<code><span>line2</span></code>"
+            + "<code><span>line3</span></code>");
+        // 不再把行内容拍平成 <br> 分隔的纯文本
+        assertThat(result).doesNotContain("line1<br>line2");
+        // 行号列与代码行不被注入通用列表/行内代码样式，排版交给微信自身
+        assertThat(result).doesNotContain("list-style:disc");
+        assertThat(result).doesNotContain("margin:0.35em 0");
+        assertThat(result).doesNotContain("background:#f2f3f5");
     }
 
     @Test
@@ -108,9 +115,9 @@ class WechatContentBeautifierTest {
         String html = "<pre><code>void f() {\n    return;\n}</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);
 
-        // 缩进空格保留（靠 white-space:pre 渲染）
-        assertThat(result).contains("void f() {<br>    return;<br>}");
-        assertThat(result).contains("white-space:pre");
+        // 缩进与换行原样保留在每个代码行的 <span> 中（微信样式 white-space:pre 不折行渲染）
+        assertThat(result).contains("<code><span>void f() {</span></code>");
+        assertThat(result).contains("<code><span>    return;</span></code>");
     }
 
     @Test
@@ -363,28 +370,36 @@ class WechatContentBeautifierTest {
     }
 
     @Test
-    void darkCodeBlockThemeUsesDarkBackground() {
-        BeautifySetting cfg = new BeautifySetting();
-        cfg.setCodeBlockTheme("dark");
-        String html = "<pre><code>int a = 1;</code></pre>";
-        String result = WechatContentBeautifier.beautify(html, cfg);
+    void codeBlockEmptyLineKeepsPlaceholder() {
+        String html = "<pre><code>a\n\nb</code></pre>";
+        String result = WechatContentBeautifier.beautify(html, null);
 
-        // 深色代码块：深底浅字，不再使用浅色主题的内阴影边框
-        assertThat(result).contains("background-color:#282c34");
-        assertThat(result).contains("color:#abb2bf");
-        assertThat(result).doesNotContain("box-shadow:rgba(216,216,216,0.5)");
+        // 空行以零宽空格占位：行高不塌陷，行号与代码行仍一一对应
+        assertThat(result).contains("<code><span>\u200b</span></code>");
+        assertThat(result.split("<li></li>", -1).length - 1).isEqualTo(3);
+        assertThat(result.split("<code><span>", -1).length - 1).isEqualTo(3);
     }
 
     @Test
-    void lightIsDefaultCodeBlockTheme() {
-        BeautifySetting cfg = new BeautifySetting();
-        cfg.setCodeBlockTheme("light");
-        String html = "<pre><code>int a = 1;</code></pre>";
-        String result = WechatContentBeautifier.beautify(html, cfg);
+    void codeBlockLanguageIsWrittenToDataLang() {
+        // 语言标识来自 <code class="language-*">（Halo/Prism 输出）
+        String fromCode = WechatContentBeautifier.beautify(
+            "<pre><code class=\"language-java\">int a = 1;</code></pre>", null);
+        assertThat(fromCode).contains("data-lang=\"java\"");
 
-        // 显式 light 与留空一致，采用微信原生浅色风格
-        assertThat(result).contains("background-color:#f8f8f8");
-        assertThat(result).contains("box-shadow:rgba(216,216,216,0.5) 0 0 0 1px inset");
+        // 语言标识来自 <pre class="language-*">（部分渲染器输出）
+        String fromPre = WechatContentBeautifier.beautify(
+            "<pre class=\"language-python\"><code>print(1)</code></pre>", null);
+        assertThat(fromPre).contains("data-lang=\"python\"");
+
+        // lang-* 前缀同样识别
+        String fromLang = WechatContentBeautifier.beautify(
+            "<pre><code class=\"lang-js\">x</code></pre>", null);
+        assertThat(fromLang).contains("data-lang=\"js\"");
+
+        // 无语言标识时省略 data-lang，代码块结构照常渲染
+        String noLang = WechatContentBeautifier.beautify("<pre><code>x</code></pre>", null);
+        assertThat(noLang).doesNotContain("data-lang");
     }
 
     @Test
