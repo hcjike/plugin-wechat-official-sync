@@ -87,7 +87,7 @@ public class WechatSyncService {
      * 但不做任何写操作——不下载/转存图片、不上传封面、不调用微信接口、不写同步记录。
      *
      * <p>返回的 {@code content}（美化后的正文）、{@code digest}（草稿摘要，按与提交一致的规则
-     * 去除首尾空白、原样同步；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}
+     * 去除首尾空白并截断到 120 字；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}
      * （草稿作者，设置的「默认作者」优先、留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}
      * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后
      * 实际写入草稿的值。</p>
@@ -103,7 +103,7 @@ public class WechatSyncService {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
                         // 摘要按与提交一致的规则解析：空表示不传 digest（微信默认抓取正文前 54 个字）
-                        result.put("digest", trimDigest(request.getDigest()));
+                        result.put("digest", truncateDigest(request.getDigest()));
                         result.put("author", firstNonBlank(cfg.getAuthor(), request.getAuthor()));
                         result.put("sourceUrl", resolveSourceUrl(permalink, baseUrl));
                         result.put("commentMode", resolveCommentMode(cfg));
@@ -241,8 +241,8 @@ public class WechatSyncService {
         article.put("title", request.getTitle() == null ? "" : request.getTitle());
         // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
         article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
-        // 摘要：读取文章摘要并原样同步（不截断，由用户发布时自行取舍）；为空时不传 digest（微信默认抓取正文前 54 个字）
-        String digest = trimDigest(request.getDigest());
+        // 摘要：读取文章摘要并截断到 120 字（超长会被微信接口拒绝提交）；为空时不传 digest（微信默认抓取正文前 54 个字）
+        String digest = truncateDigest(request.getDigest());
         if (!digest.isEmpty()) {
             article.put("digest", digest);
         }
@@ -259,13 +259,47 @@ public class WechatSyncService {
         return article;
     }
 
+    /** 微信图文摘要（{@code digest}）总长度上限：120 个字（微信计字：全角字符 1 字、半角字符 0.5 字、emoji 2 字；超长会被微信接口拒绝提交）。 */
+    static final int MAX_DIGEST_LENGTH = 120;
+
     /**
-     * 整理草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
-     * {@code digest}，由微信默认抓取正文前 54 个字）；非空则原样返回、不做长度截断，
-     * 超长摘要完整同步到公众号草稿，由用户在发布时自行取舍保留哪部分。
+     * 规范化草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
+     * {@code digest}，由微信默认抓取正文前 54 个字）；超长时按微信的计字规则截断到
+     * {@link #MAX_DIGEST_LENGTH} 个字——一个汉字 / 全角字符计 1 个字，一个半角字符（英文字符、
+     * 数字、符号）计 0.5 个字，一个 emoji 等增补字符（UTF-16 代理对）计 2 个字（与公众号编辑器
+     * 摘要计数器实测一致）；按码点整体取舍，避免把 emoji 截成半个代理对。
+     *
+     * <p><b>必须保留截断</b>：超长摘要会被微信 {@code draft/add} 接口拒绝，导致整次同步失败；
+     * 不能把超长摘要原样交给微信。</p>
      */
-    static String trimDigest(String digest) {
-        return digest == null ? "" : digest.trim();
+    static String truncateDigest(String digest) {
+        if (digest == null || digest.isBlank()) {
+            return "";
+        }
+        String trimmed = digest.trim();
+        // 以「半角单位」计数避免浮点：半角字符 1 个单位（=0.5 字）、汉字/全角 2 个单位（=1 字）、
+        // emoji 等增补字符 4 个单位（=2 字，对应 2 个 UTF-16 编码单元）
+        int maxHalfUnits = MAX_DIGEST_LENGTH * 2;
+        int halfUnits = 0;
+        int end = 0;
+        while (end < trimmed.length()) {
+            int codePoint = trimmed.codePointAt(end);
+            int units = wechatHalfUnits(codePoint);
+            if (halfUnits + units > maxHalfUnits) {
+                break;
+            }
+            halfUnits += units;
+            end += Character.charCount(codePoint);
+        }
+        return trimmed.substring(0, end);
+    }
+
+    /** 单个码点的微信计字折算（半角单位）：ASCII 半角字符 1 个单位（0.5 字）；BMP 汉字/全角 2 个单位（1 字）；emoji 等增补字符 4 个单位（2 字）。 */
+    private static int wechatHalfUnits(int codePoint) {
+        if (codePoint <= 0x7F) {
+            return 1;
+        }
+        return Character.charCount(codePoint) * 2;
     }
 
     /**

@@ -18,8 +18,9 @@ import run.halo.app.infra.SystemSetting;
 
 /**
  * {@link WechatSyncService} 的行为验证：原文链接始终按「外部访问地址 + 文章路由」拼接；留言设置按选项映射
- * 并兼容旧开关；摘要去除首尾空白后原样同步（不做长度截断、空白按未填写处理）；预览按与提交一致
- * 的规则解析（作者优先级 / 原文链接 / 留言设置 / 正文美化）；同步前预检汇总微信配置与封面图等已知问题。
+ * 并兼容旧开关；摘要按微信计字规则（全角 1 字、半角 0.5 字、emoji 2 字）截断到 120 字（超长摘要
+ * 会被微信接口拒绝）、空白按未填写处理；预览按与提交一致的规则解析（作者优先级 / 原文链接 / 留言
+ * 设置 / 正文美化）；同步前预检汇总微信配置与封面图等已知问题。
  */
 class WechatSyncServiceTest {
 
@@ -116,14 +117,43 @@ class WechatSyncServiceTest {
     }
 
     @Test
-    void digestIsTrimmedAndSyncedWithoutTruncation() {
+    void digestIsTrimmedAndKeptWholeWithinLimit() {
         // 未填写（null / 纯空白）视为空摘要：返回空串，草稿不传 digest，由微信默认抓取正文前 54 个字
-        assertThat(WechatSyncService.trimDigest(null)).isEmpty();
-        assertThat(WechatSyncService.trimDigest("   ")).isEmpty();
-        assertThat(WechatSyncService.trimDigest("  简短摘要  ")).isEqualTo("简短摘要");
-        // 不做长度截断：超长摘要（含 emoji 等增补字符）完整原样同步，由用户发布时自行取舍
-        String longText = "摘要".repeat(100) + "😀".repeat(20);
-        assertThat(WechatSyncService.trimDigest(longText)).isEqualTo(longText);
+        assertThat(WechatSyncService.truncateDigest(null)).isEmpty();
+        assertThat(WechatSyncService.truncateDigest("   ")).isEmpty();
+        assertThat(WechatSyncService.truncateDigest("  简短摘要  ")).isEqualTo("简短摘要");
+        // 正好 120 字保持原样（不能移除截断：超长摘要会被微信接口拒绝）
+        String exact = "摘".repeat(WechatSyncService.MAX_DIGEST_LENGTH);
+        assertThat(WechatSyncService.truncateDigest(exact)).isEqualTo(exact);
+    }
+
+    @Test
+    void digestTruncationCountsEmojiAsTwoCharacters() {
+        // emoji 按公众号摘要计数器实测的 2 个字计：118 个汉字 + 1 个 emoji = 120 字，恰好保留
+        String full = "摘".repeat(118) + "😀";
+        assertThat(WechatSyncService.truncateDigest(full)).isEqualTo(full);
+        // 再加 1 个 emoji 超出 120 字：整个 emoji 被截掉，不会截成半个代理对
+        String truncated = WechatSyncService.truncateDigest("摘".repeat(118) + "😀😀");
+        assertThat(truncated).isEqualTo(full);
+        assertThat(truncated.codePointCount(0, truncated.length())).isEqualTo(119);
+        // 119 个汉字后只剩 1 字空间，emoji（2 字）放不下，只能截到 119 个汉字
+        assertThat(WechatSyncService.truncateDigest("摘".repeat(119) + "😀"))
+            .isEqualTo("摘".repeat(119));
+    }
+
+    @Test
+    void digestTruncationAppliesWechatWidthRule() {
+        // 半角字符（英文/数字/符号）按 0.5 字计：240 个英文字符 = 120 字，整段保留
+        String ascii = "a".repeat(WechatSyncService.MAX_DIGEST_LENGTH * 2);
+        assertThat(WechatSyncService.truncateDigest(ascii)).isEqualTo(ascii);
+        // 超出 120 字（半角单位 240）时在边界处截断：第 241 个半角字符被丢弃
+        assertThat(WechatSyncService.truncateDigest(ascii + "b")).isEqualTo(ascii);
+        // 混合内容：119 个汉字（119 字）+ 2 个半角字符 = 120 字，边界保留；后续字符被截断
+        String mixed = "中".repeat(119) + "ab" + "cd";
+        assertThat(WechatSyncService.truncateDigest(mixed)).isEqualTo("中".repeat(119) + "ab");
+        // 半角符号同英文一样按 0.5 字计：239 个半角符号 = 119.5 字，再加 1 个汉字（1 字）超出 120 字被截断
+        String symbols = "!".repeat(239) + "中";
+        assertThat(WechatSyncService.truncateDigest(symbols)).isEqualTo("!".repeat(239));
     }
 
     @Test
