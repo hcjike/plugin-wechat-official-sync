@@ -69,14 +69,23 @@ async function submitSync(post: ListedPost, content: string) {
     digest: '',
     content,
   })
-  // 立即在列表状态列标记为「同步中」，随后延时刷新以捕获异步的最终结果
+  // 立即在列表状态列标记为「同步中」，并刷新一次服务端记录（接口返回 202 时服务端已落库 PENDING）；
+  // 后续由 syncStatus 的自动轮询持续刷新，直到任务落到成功/失败终态——低带宽 + 大量
+  // 图片时上传耗时会超出固定次数的延时刷新，必须轮询才能捕获真正的结果
   setLocalRecord(postName, {
     status: 'PENDING',
     message: '同步任务已提交，正在处理…',
     time: new Date().toISOString(),
   })
-  setTimeout(() => loadRecords(true), 4000)
-  setTimeout(() => loadRecords(true), 12000)
+  void loadRecords(true)
+}
+
+/**
+ * 提取服务端返回的错误提示（如「该文章正在同步中」的 409），结构不符时返回空串。
+ */
+function serverErrorMessage(error: unknown): string {
+  const message = (error as { response?: { data?: { message?: unknown } } })?.response?.data?.message
+  return typeof message === 'string' ? message : ''
 }
 
 /**
@@ -104,8 +113,9 @@ export function confirmSyncToWechat(post: ListedPost) {
       await submitSync(post, content || (await fetchRenderedContent(post)))
       Toast.success('同步任务已提交，请稍后前往公众号草稿箱查看')
       return true
-    } catch {
-      Toast.error('提交同步任务失败，请检查插件配置或服务端日志')
+    } catch (e) {
+      // 服务端拒绝提交（如同步中重复提交）时会返回带 message 的错误体，优先展示
+      Toast.error(serverErrorMessage(e) || '提交同步任务失败，请检查插件配置或服务端日志')
       return false
     }
   }

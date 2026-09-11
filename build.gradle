@@ -45,7 +45,10 @@ halo {
     version = '2.26'
 }
 
-tasks.register('processUiResources', Copy) {
+// 用 Sync 而非 Copy：vite 产物文件名带内容 hash，Copy 不会删除上一次的旧文件，
+// 会导致旧 JS 残留在 jar 中（体积冗余且容易出现「页面加载旧代码」的迷惑现象）；
+// Sync 保证目标目录与 dist 完全一致
+tasks.register('processUiResources', Sync) {
     from project(':ui').layout.buildDirectory.dir('dist')
     into layout.buildDirectory.dir('resources/main/ui')
     dependsOn project(':ui').tasks.named('assemble')

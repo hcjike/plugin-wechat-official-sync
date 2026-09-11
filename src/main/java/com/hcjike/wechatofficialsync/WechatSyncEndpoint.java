@@ -3,6 +3,7 @@ package com.hcjike.wechatofficialsync;
 import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
@@ -57,27 +58,45 @@ public class WechatSyncEndpoint implements CustomEndpoint {
             .flatMap(body -> {
                 String postName = body.getPostName() == null ? "" : body.getPostName();
                 log.info("收到同步请求：文章《{}》，postName={}", body.getTitle(), postName);
-                return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
-                    .flatMap(setting -> settingFetcher
-                        .fetch(BeautifySetting.GROUP, BeautifySetting.class)
-                        // 未配置「正文美化」分组时用内置默认值，保证美化不中断
-                        .defaultIfEmpty(new BeautifySetting())
-                        .flatMap(beautify -> recordStore.save(postName, SyncRecord.pending())
-                            // 先落库「同步中」，再异步执行，接口立即返回，不阻塞 Console 请求
-                            .then(Mono.fromRunnable(() -> startAsync(body, setting, beautify)))
-                            .then(ServerResponse.accepted()
-                                .bodyValue(Map.of(
-                                    "message", "同步任务已提交",
-                                    "postName", postName)))))
-                    .switchIfEmpty(Mono.defer(() -> {
-                        log.warn("文章《{}》同步被拒绝：插件尚未配置微信公众号信息", body.getTitle());
-                        return recordStore
-                            .save(postName, SyncRecord.failed("插件尚未配置微信公众号信息"))
-                            .then(ServerResponse.badRequest()
-                                .bodyValue(Map.of(
-                                    "message", "请先在插件设置中配置 AppID / AppSecret")));
-                    }));
+                // 同一文章已有进行中的同步任务时拒绝重复提交（409）：
+                // 避免重复上传素材、重复建草稿，以及两个任务的状态互相覆盖
+                return recordStore.findAll()
+                    .flatMap(records -> {
+                        SyncRecord existing = records.get(postName);
+                        if (existing != null && SyncRecord.STATUS_PENDING.equals(existing.getStatus())) {
+                            log.info("文章《{}》正在同步中，忽略本次重复提交", body.getTitle());
+                            return ServerResponse.status(HttpStatus.CONFLICT)
+                                .bodyValue(Map.of("message", "该文章正在同步中，请等待完成后再试"));
+                        }
+                        return doSync(body, postName);
+                    });
             });
+    }
+
+    /**
+     * 通过重复提交检查后的提交流程：先落库「同步中」，再异步执行，接口立即返回。
+     */
+    private Mono<ServerResponse> doSync(SyncRequest body, String postName) {
+        return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
+            .flatMap(setting -> settingFetcher
+                .fetch(BeautifySetting.GROUP, BeautifySetting.class)
+                // 未配置「正文美化」分组时用内置默认值，保证美化不中断
+                .defaultIfEmpty(new BeautifySetting())
+                .flatMap(beautify -> recordStore.save(postName, SyncRecord.pending())
+                    // 先落库「同步中」，再异步执行，接口立即返回，不阻塞 Console 请求
+                    .then(Mono.fromRunnable(() -> startAsync(body, setting, beautify)))
+                    .then(ServerResponse.accepted()
+                        .bodyValue(Map.of(
+                            "message", "同步任务已提交",
+                            "postName", postName)))))
+            .switchIfEmpty(Mono.defer(() -> {
+                log.warn("文章《{}》同步被拒绝：插件尚未配置微信公众号信息", body.getTitle());
+                return recordStore
+                    .save(postName, SyncRecord.failed("插件尚未配置微信公众号信息"))
+                    .then(ServerResponse.badRequest()
+                        .bodyValue(Map.of(
+                            "message", "请先在插件设置中配置 AppID / AppSecret")));
+            }));
     }
 
     /**
