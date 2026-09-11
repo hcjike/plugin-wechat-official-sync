@@ -84,9 +84,11 @@ public class WechatSyncService {
      * 构建「同步预览」：按与 {@link #submit} 一致的规则解析正文美化效果与草稿元信息，
      * 但不做任何写操作——不下载/转存图片、不上传封面、不调用微信接口、不写同步记录。
      *
-     * <p>返回的 {@code content}（美化后的正文）、{@code author}（草稿作者，设置的「默认作者」优先、
-     * 留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}（草稿「阅读原文」链接，
-     * 为空表示不会生成）与 {@code commentMode}（留言设置）即提交后实际写入草稿的值。</p>
+     * <p>返回的 {@code content}（美化后的正文）、{@code digest}（草稿摘要，按与提交一致的规则
+     * 截断；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}（草稿作者，设置的
+     * 「默认作者」优先、留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}
+     * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后
+     * 实际写入草稿的值。</p>
      */
     public Mono<Map<String, Object>> preview(SyncRequest request, WechatSetting setting,
         BeautifySetting beautify) {
@@ -98,6 +100,8 @@ public class WechatSyncService {
                     .map(html -> {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
+                        // 摘要按与提交一致的规则解析：空表示不传 digest（微信默认抓取正文前 54 个字）
+                        result.put("digest", truncateDigest(request.getDigest()));
                         result.put("author", firstNonBlank(cfg.getAuthor(), request.getAuthor()));
                         result.put("sourceUrl", resolveSourceUrl(permalink, baseUrl));
                         result.put("commentMode", resolveCommentMode(cfg));
@@ -168,7 +172,11 @@ public class WechatSyncService {
         article.put("title", request.getTitle() == null ? "" : request.getTitle());
         // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
         article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
-        article.put("digest", request.getDigest() == null ? "" : request.getDigest());
+        // 摘要：读取文章摘要；为空时不传 digest（微信默认抓取正文前 54 个字），非空时最长 120 字
+        String digest = truncateDigest(request.getDigest());
+        if (!digest.isEmpty()) {
+            article.put("digest", digest);
+        }
         article.put("content", content);
         // 原文链接：图文底部的「阅读原文」；为空时微信不显示该入口
         article.put("content_source_url", sourceUrl == null ? "" : sourceUrl);
@@ -180,6 +188,25 @@ public class WechatSyncService {
             article.put("thumb_media_id", thumbMediaId);
         }
         return article;
+    }
+
+    /** 微信图文摘要（{@code digest}）总长度上限：120 个字。 */
+    static final int MAX_DIGEST_LENGTH = 120;
+
+    /**
+     * 规范化草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
+     * {@code digest}，由微信默认抓取正文前 54 个字）；超长时按码点截断到
+     * {@link #MAX_DIGEST_LENGTH} 个字，避免把 emoji 等增补字符截成半个代理对。
+     */
+    static String truncateDigest(String digest) {
+        if (digest == null || digest.isBlank()) {
+            return "";
+        }
+        String trimmed = digest.trim();
+        if (trimmed.codePointCount(0, trimmed.length()) <= MAX_DIGEST_LENGTH) {
+            return trimmed;
+        }
+        return trimmed.substring(0, trimmed.offsetByCodePoints(0, MAX_DIGEST_LENGTH));
     }
 
     /**

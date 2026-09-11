@@ -11,12 +11,28 @@ const PREVIEW_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/preview'
 export interface PreviewPayload {
   /** 美化后的正文 HTML（提交到微信草稿后的大致效果）。 */
   content: string
+  /** 草稿摘要；为空表示未填写（提交时不传 digest，微信默认抓取正文前 54 个字）。 */
+  digest: string
   /** 草稿作者：插件「默认作者」优先，留空回退文章作者；为空表示未设置。 */
   author: string
   /** 草稿「阅读原文」链接；为空表示不会生成（文章缺少路由或站点未配置「外部访问地址」）。 */
   sourceUrl: string
   /** 留言设置：close=关闭；all=所有人可留言；fans=仅关注的人可留言。 */
   commentMode: string
+}
+
+/** 微信图文摘要（digest）总长度上限：120 个字。 */
+const MAX_DIGEST_LENGTH = 120
+
+/**
+ * 读取文章的摘要（Halo「摘要」字段）作为草稿 digest：
+ * 空摘要返回空串（服务端不传该字段，由微信默认抓取正文前 54 个字）；
+ * 超长时按字符数（码点，emoji 按 1 个字计）截断到 120 个字，避免超出微信接口限制。
+ */
+function digestOf(post: ListedPost): string {
+  const raw = post.post.spec?.excerpt?.raw?.trim() || ''
+  const chars = [...raw]
+  return chars.length > MAX_DIGEST_LENGTH ? chars.slice(0, MAX_DIGEST_LENGTH).join('') : raw
 }
 
 /**
@@ -26,6 +42,7 @@ function syncFieldsOf(post: ListedPost) {
   return {
     postName: post.post.metadata.name,
     title: post.post.spec?.title || '',
+    digest: digestOf(post),
     cover: post.post.spec?.cover || '',
     author: post.owner?.displayName || '',
     // 文章路由（如 /archives/xxx），服务端与站点「外部访问地址」拼为草稿「原文链接」
@@ -48,11 +65,11 @@ async function fetchRenderedContent(post: ListedPost): Promise<string> {
 async function fetchPreview(post: ListedPost, content: string): Promise<PreviewPayload> {
   const { data } = await axiosInstance.post<Partial<PreviewPayload>>(PREVIEW_URL, {
     ...syncFieldsOf(post),
-    digest: '',
     content,
   })
   return {
     content: data?.content || '',
+    digest: data?.digest || '',
     author: data?.author || '',
     sourceUrl: data?.sourceUrl || '',
     commentMode: data?.commentMode || 'close',
@@ -66,7 +83,6 @@ async function submitSync(post: ListedPost, content: string) {
   const postName = post.post.metadata.name
   await axiosInstance.post(SYNC_URL, {
     ...syncFieldsOf(post),
-    digest: '',
     content,
   })
   // 立即在列表状态列标记为「同步中」，并刷新一次服务端记录（接口返回 202 时服务端已落库 PENDING）；
