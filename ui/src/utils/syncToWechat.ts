@@ -22,13 +22,53 @@ export interface PreviewPayload {
   commentMode: string
 }
 
+/** 微信图文摘要（digest）总长度上限：120 个字（微信计字：全角字符 1 字、半角字符 0.5 字、emoji 2 字；超长会被微信接口拒绝提交）。 */
+const MAX_DIGEST_LENGTH = 120
+
 /**
  * 读取文章的摘要（Halo「摘要」字段）作为草稿 digest：
  * 空摘要返回空串（服务端不传该字段，由微信默认抓取正文前 54 个字）；
- * 非空时原样上送、不做长度截断，超长摘要完整同步到草稿，由用户在发布时自行取舍。
+ * 超长时按微信的计字规则截断到 120 个字，避免被微信接口拒绝提交。
  */
 function digestOf(post: ListedPost): string {
-  return post.post.spec?.excerpt?.raw?.trim() || ''
+  return truncateDigest(post.post.spec?.excerpt?.raw?.trim() || '')
+}
+
+/**
+ * 按微信的计字规则截断摘要：一个汉字 / 全角字符计 1 个字，一个半角字符（英文字符、数字、符号）
+ * 计 0.5 个字，一个 emoji 等增补字符计 2 个字（与公众号编辑器摘要计数器一致）；
+ * 截断到不超过 120 个字——超长摘要会被微信接口拒绝，必须截断。
+ * 与后端 WechatSyncService.truncateDigest 保持同一规则（服务端提交前会再截断一次兑底）。
+ */
+function truncateDigest(text: string): string {
+  // 以「半角单位」计数避免浮点误差：半角字符 1 个单位（=0.5 个字）、汉字/全角 2 个单位（=1 个字）、
+  // emoji 等增补字符 4 个单位（=2 个字）
+  const maxHalfUnits = MAX_DIGEST_LENGTH * 2
+  let halfUnits = 0
+  let result = ''
+  // for...of 按码点迭代：emoji 等增补字符不会被截成半个代理对
+  for (const char of text) {
+    const units = wechatHalfUnitsOf(char)
+    if (halfUnits + units > maxHalfUnits) {
+      break
+    }
+    result += char
+    halfUnits += units
+  }
+  return result
+}
+
+/** 单个码点的微信计字折算（半角单位）：ASCII 半角字符 0.5 个字、汉字/全角字符 1 个字、emoji 等增补字符 2 个字。 */
+function wechatHalfUnitsOf(char: string): number {
+  const cp = char.codePointAt(0) ?? 0
+  if (cp <= 0x7f) {
+    return 1
+  }
+  // 增补字符（emoji 等）在 UTF-16 中是 2 个编码单元，公众号编辑器摘要计数器实测按 2 个字计
+  if (cp > 0xffff) {
+    return 4
+  }
+  return 2
 }
 
 /**
