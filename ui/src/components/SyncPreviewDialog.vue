@@ -454,4 +454,16 @@ onBeforeUnmount(() => {
   font-family: inherit;
   white-space: pre;
 }
+
+/* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
+   预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
+.sync-preview__content :deep(.wechat-layout-table td) {
+  border: 1px solid #e6e6e6;
+}
+
+/* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
+   一个独立表格（一个卡片 = 一个表格），紧贴显示时浅灰边框会连成一片、看起来像一个表格 */
+.sync-preview__content :deep(.wechat-layout-table + .wechat-layout-table) {
+  margin-top: 10px;
+}
 </style>

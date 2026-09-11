@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Attribute;
@@ -139,7 +140,52 @@ final class WechatContentBeautifier {
 
     private static final String HR_STYLE = "border:none;border-top:1px solid #eaeaea;margin:1.6em 0;";
 
-    private static final String FIGCAPTION_STYLE = "text-align:center;font-size:13px;color:#999999;margin-top:6px;";
+    /**
+     * 图片描述（{@code <figcaption>}，对应 Halo 编辑器的「图片描述 / Image description」）：
+     * 对齐 Halo 编辑器 {@code figure figcaption} 的默认观感——居中、灰色小字、<b>斜体</b>
+     * （Halo 编辑器样式即 {@code font-style: italic}），斜体在微信侧同样保真渲染。
+     */
+    private static final String FIGCAPTION_STYLE =
+        "text-align:center;font-size:13px;color:#999999;font-style:italic;margin-top:6px;";
+
+    /**
+     * 布局表格样式（分栏卡片/画廊重建用）：铺满屏宽、固定布局按单元格百分比宽度分配列宽、
+     * 不带正文表格的边框与内边距。布局表格在通用样式注入<b>之后</b>重建，不受 {@link #TABLE_STYLE} 影响。
+     */
+    private static final String LAYOUT_TABLE_STYLE = "width:100%;border-collapse:collapse;table-layout:fixed;";
+
+    /**
+     * 布局表格标记类名：供 Console 预览弹窗为重建后的分栏/画廊表格补充辨识样式（预览里显示浅灰细边框）。
+     * 提交到微信的产物不依赖该类名——微信端无匹配样式、class 属性被剥离也不影响渲染。
+     */
+    private static final String LAYOUT_TABLE_CLASS = "wechat-layout-table";
+
+    /**
+     * 画廊图片覆写样式：Halo 画廊的图片靠 flex 项撑高（{@code height:100%}），表格布局下改由宽度
+     * 决定高度，须覆盖为自动高度，并去掉正文图片的段落外边距（原有样式在前、本样式在后）。
+     */
+    private static final String GALLERY_IMG_STYLE = "width:100%;height:auto;display:block;margin:0;";
+
+    /** 分栏容器的缺省间距：编辑器默认 {@code gap: 1em}，按 16px 正文字号折算。 */
+    private static final int DEFAULT_COLUMN_GAP_PX = 16;
+
+    /** 间距 {@code em} 单位的像素换算基准：正文字号为 16px（见 {@link #baseStyle}）。 */
+    private static final int EM_TO_PX = 16;
+
+    /**
+     * 画廊统一网格的列数上限：各行图片数（分组大小与末行余数）的最小公倍数超过它时退化为
+     * 最大行图片数，避免极端分组数下表格列数过大（此时仅末行可能不再精确等分）。
+     */
+    private static final int MAX_GALLERY_GRID_COLUMNS = 60;
+
+    /** 内联样式中的 flex grow 值（{@code flex: 2 1} → 2）：分栏列宽按该值比例分配。 */
+    private static final Pattern STYLE_FLEX_GROW = Pattern.compile("\\bflex\\s*:\\s*([\\d.]+)");
+
+    /** 内联样式中的 {@code gap} 间距（如 {@code gap: 1em}），仅识别数值与 em/px 单位。 */
+    private static final Pattern STYLE_GAP = Pattern.compile("\\bgap\\s*:\\s*([\\d.]+)\\s*(em|px)?");
+
+    /** 从纯数值文本（如画廊 {@code data-gap="8"}）中提取首个数值。 */
+    private static final Pattern SIZE_NUMBER = Pattern.compile("([\\d.]+)");
 
     /**
      * 内容型标签：段落若含这些后代则视为非空，不能被当作空段落删除。
@@ -186,6 +232,9 @@ final class WechatContentBeautifier {
         buildTables(body);
         injectStyles(body, cfg);
         wrapWithBase(body, cfg);
+        // 分栏卡片与画廊须在流程最后由表格布局重建：微信会过滤 display:grid、flex 支持不稳定，直接同步会导致
+        // 各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
+        rebuildBlockLayouts(body);
         return body.html();
     }
 
@@ -613,6 +662,314 @@ final class WechatContentBeautifier {
             }
         }
         return null;
+    }
+
+    /**
+     * 把 Halo 编辑器的「分栏卡片」与「画廊」区块重建为表格布局。
+     *
+     * <p>Halo 编辑器输出的分栏依赖 {@code display:flex}、画廊依赖 {@code display:grid}+flex 排布，
+     * 但微信图文会过滤 {@code display:grid}、对 {@code display:flex} 的支持也不稳定，直接同步会让
+     * 各列/各图纵向堆叠、各占一行。故把这些区块重建为微信渲染最可靠的 {@code <table>} 布局：
+     * 分栏卡片重建为一个单行表格（每列一个单元格，列宽按列的 {@code flex} 比例分配）；
+     * 画廊重建为一个整体表格、所有列等宽（见 {@link #rebuildGallery}）。</p>
+     *
+     * <p>须在整个美化流程最后执行（见 {@link #beautify}）：布局表格不再参与通用 {@code table/td}
+     * 样式注入，也不会被 {@link #buildTables} 包上横向滚动容器（其宽度恒为 100%，无需滚动兜底）。</p>
+     */
+    private static void rebuildBlockLayouts(Element body) {
+        rebuildColumns(body);
+        rebuildGallery(body);
+    }
+
+    /**
+     * 重建分栏卡片：{@code <div class="columns">} 的每列一个 {@code <td>}，列宽按各列 {@code flex} 的
+     * grow 值比例分配，列间距折算为非首列单元格的 {@code padding-left}。
+     *
+     * <p>倒序遍历快照：嵌套分栏时先重建内层，外层重建搬运的子树中已是重建后的表格。</p>
+     */
+    private static void rebuildColumns(Element body) {
+        List<Element> containers = body.select("div.columns, div[data-type=columns]");
+        for (int i = containers.size() - 1; i >= 0; i--) {
+            Element container = containers.get(i);
+            // 可能已随外层分栏重建被替换/搬运后脱离文档，跳过失效节点
+            if (container.parent() == null) {
+                continue;
+            }
+            List<Element> columns = columnChildren(container);
+            if (columns.isEmpty()) {
+                continue;
+            }
+            List<Double> ratios = growRatios(columns);
+            int gap = columnGapPx(container.attr("style"));
+            Element table = createLayoutTable();
+            Element tbody = table.child(0);
+            addColgroup(table, ratios);
+            Element row = new Element(Tag.valueOf("tr"), "");
+            tbody.appendChild(row);
+            for (int c = 0; c < columns.size(); c++) {
+                Element cell = new Element(Tag.valueOf("td"), "");
+                cell.attr("style", layoutCellStyle(0, c, gap, ratios.get(c)));
+                moveChildrenInto(columns.get(c), cell);
+                row.appendChild(cell);
+            }
+            container.replaceWith(table);
+        }
+    }
+
+    /**
+     * 重建画廊：整张画廊重建为<b>一个整体表格</b>、所有列等宽（用户确认的期望版式——不按各图宽高比
+     * 分宽，也不按行拆成多个表格）。
+     *
+     * <p>统一网格：列数取各行图片数的最小公倍数（见 {@link #galleryGridColumns}），行内图片用
+     * {@code colspan} 均分整行——3 图行各占三分之一、2 图行各占二分之一，末行不满时同样铺满整行，
+     * 表格的列宽始终一致。{@code data-gap} 折算为非首列单元格的 {@code padding-left}（行内间距）
+     * 与非首行单元格的 {@code padding-top}（行间距）。</p>
+     *
+     * <p>图片原样式靠 flex 项撑高（{@code height:100%}），表格布局下改由宽度决定高度，故追加覆写样式
+     * （见 {@link #GALLERY_IMG_STYLE}）。无有效图片行的画廊保持原结构不动。</p>
+     */
+    private static void rebuildGallery(Element body) {
+        for (Element gallery : body.select("div[data-type=gallery]")) {
+            if (gallery.parent() == null) {
+                continue;
+            }
+            List<List<Element>> rows = new ArrayList<>();
+            for (Element group : gallery.select("div[data-type=gallery-group]")) {
+                if (!group.children().isEmpty()) {
+                    rows.add(group.children());
+                }
+            }
+            if (rows.isEmpty()) {
+                continue;
+            }
+            int gap = galleryGapPx(gallery.attr("data-gap"));
+            int columns = galleryGridColumns(rows);
+            Element table = createLayoutTable();
+            Element tbody = table.child(0);
+            addColgroup(table, uniformRatios(columns));
+            for (int r = 0; r < rows.size(); r++) {
+                List<Element> items = rows.get(r);
+                // 行内均分：跨列数 = 统一网格列数 / 该行图片数（最小公倍数保证整除，末行不满时也铺满整行）
+                int span = columns % items.size() == 0 ? columns / items.size() : 1;
+                Element row = new Element(Tag.valueOf("tr"), "");
+                tbody.appendChild(row);
+                for (int c = 0; c < items.size(); c++) {
+                    Element cell = new Element(Tag.valueOf("td"), "");
+                    if (span > 1) {
+                        cell.attr("colspan", String.valueOf(span));
+                    }
+                    cell.attr("style", layoutCellStyle(r, c, gap, 1.0 / items.size()));
+                    moveChildrenInto(items.get(c), cell);
+                    row.appendChild(cell);
+                }
+            }
+            for (Element img : table.select("img")) {
+                overrideStyle(img, GALLERY_IMG_STYLE);
+            }
+            gallery.replaceWith(table);
+        }
+    }
+
+    /** 新建布局表格骨架 {@code <table class=… style=…><tbody></tbody></table>}，行由调用方追加到 {@code <tbody>}。 */
+    private static Element createLayoutTable() {
+        Element table = new Element(Tag.valueOf("table"), "");
+        table.addClass(LAYOUT_TABLE_CLASS);
+        table.attr("style", LAYOUT_TABLE_STYLE);
+        table.appendChild(new Element(Tag.valueOf("tbody"), ""));
+        return table;
+    }
+
+    /**
+     * 给布局表格插入 {@code <colgroup>} 声明各列宽度占比：与 {@code table-layout:fixed} 搭配时列宽
+     * 由 {@code <col>} 决定，与微信编辑器原生表格按 {@code <colgroup>} 渲染列宽的行为一致；单元格
+     * 自身也带相同的宽度样式，作为不支持 {@code colgroup} 的渲染器的兜底。
+     */
+    private static void addColgroup(Element table, List<Double> ratios) {
+        Element colgroup = new Element(Tag.valueOf("colgroup"), "");
+        for (Double ratio : ratios) {
+            Element col = new Element(Tag.valueOf("col"), "");
+            col.attr("style", "width:" + formatPercent(ratio) + ";");
+            colgroup.appendChild(col);
+        }
+        Element tbody = table.selectFirst("tbody");
+        if (tbody == null) {
+            table.appendChild(colgroup);
+        } else {
+            tbody.before(colgroup);
+        }
+    }
+
+    /**
+     * 取出分栏容器的列元素：优先 class 含 {@code column} 或 {@code data-type="column"} 的直接子元素；
+     * 都匹配不到时兜底取全部直接子元素（兼容其他渲染器/手写 HTML 的变体结构）。
+     */
+    private static List<Element> columnChildren(Element container) {
+        List<Element> columns = new ArrayList<>();
+        for (Element child : container.children()) {
+            if (child.hasClass("column") || "column".equalsIgnoreCase(child.attr("data-type"))) {
+                columns.add(child);
+            }
+        }
+        if (columns.isEmpty()) {
+            columns.addAll(container.children());
+        }
+        return columns;
+    }
+
+    /** 分栏列宽占比：取各列的 flex grow 值归一化；全部解析失败时按均分处理。 */
+    private static List<Double> growRatios(List<Element> items) {
+        List<Double> values = new ArrayList<>(items.size());
+        for (Element item : items) {
+            values.add(flexGrow(item));
+        }
+        return normalizeRatios(values);
+    }
+
+    /**
+     * 画廊统一网格的列数：取各行图片数的最小公倍数——所有列等宽，且每行都能用整数列的
+     * {@code colspan} 均分整行（末行不满时同样铺满）。极端分组数下最小公倍数可能过大，超过
+     * {@link #MAX_GALLERY_GRID_COLUMNS} 时退化为最大行图片数（此时仅末行可能不再精确等分）。
+     */
+    private static int galleryGridColumns(List<List<Element>> rows) {
+        int max = 0;
+        int columns = 1;
+        for (List<Element> row : rows) {
+            int count = row.size();
+            max = Math.max(max, count);
+            columns = lcm(columns, count);
+        }
+        return columns > MAX_GALLERY_GRID_COLUMNS ? max : columns;
+    }
+
+    /** 最小公倍数（先除后乘，避免极端值下乘法溢出）。 */
+    private static int lcm(int a, int b) {
+        return a / gcd(a, b) * b;
+    }
+
+    /** 最大公约数：欧几里得算法。 */
+    private static int gcd(int a, int b) {
+        return b == 0 ? a : gcd(b, a % b);
+    }
+
+    /** 画廊统一网格的等宽列占比：{@code columns} 列各占 {@code 1/columns}。 */
+    private static List<Double> uniformRatios(int columns) {
+        List<Double> ratios = new ArrayList<>(columns);
+        for (int i = 0; i < columns; i++) {
+            ratios.add(1.0 / columns);
+        }
+        return ratios;
+    }
+
+    /** 把一组正数归一化为合计 1 的宽度占比；总和恰为 0 时按均分处理。 */
+    private static List<Double> normalizeRatios(List<Double> values) {
+        double total = 0;
+        for (Double value : values) {
+            total += value;
+        }
+        for (int i = 0; i < values.size(); i++) {
+            values.set(i, total > 0 ? values.get(i) / total : 1.0 / values.size());
+        }
+        return values;
+    }
+
+    /** 解析内联样式中的 flex grow 值（{@code flex: 2 1} → 2），取不到时兜底 1（均分）。 */
+    private static double flexGrow(Element element) {
+        Double fromStyle = positiveNumber(STYLE_FLEX_GROW, element.attr("style"));
+        return fromStyle == null ? 1 : fromStyle;
+    }
+
+    /**
+     * 用给定正则从文本中提取首个正数（预期第 1 个捕获组为数值）；文本为空、无匹配或解析失败时
+     * 返回 {@code null}，绝不抛出异常。
+     */
+    private static Double positiveNumber(Pattern pattern, String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        Matcher matcher = pattern.matcher(text);
+        if (!matcher.find()) {
+            return null;
+        }
+        try {
+            double value = Double.parseDouble(matcher.group(1));
+            return value > 0 ? value : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /** 解析分栏容器的 {@code gap} 间距（像素）：{@code em} 按 16px 字号折算，缺省单位按 px；取不到时用默认 16px。 */
+    private static int columnGapPx(String style) {
+        if (style != null) {
+            Matcher matcher = STYLE_GAP.matcher(style);
+            if (matcher.find()) {
+                return toPx(matcher.group(1), matcher.group(2));
+            }
+        }
+        return DEFAULT_COLUMN_GAP_PX;
+    }
+
+    /**
+     * 解析画廊 {@code data-gap}（渲染器输出为像素数值，如 {@code data-gap="8"}）；
+     * 解析失败时按 0（无间距）处理。
+     */
+    private static int galleryGapPx(String dataGap) {
+        Double value = positiveNumber(SIZE_NUMBER, dataGap);
+        return value == null ? 0 : (int) Math.round(value);
+    }
+
+    /** 把尺寸值折算为像素：{@code em} × 16，其余（px/缺省单位）按原值；解析失败回退默认分栏间距。 */
+    private static int toPx(String value, String unit) {
+        try {
+            double size = Double.parseDouble(value);
+            if (unit != null && unit.equalsIgnoreCase("em")) {
+                size *= EM_TO_PX;
+            }
+            return (int) Math.round(size);
+        } catch (NumberFormatException e) {
+            return DEFAULT_COLUMN_GAP_PX;
+        }
+    }
+
+    /**
+     * 生成布局单元格样式：顶部对齐、盒模型含内边距，非首行加 {@code padding-top}、非首列加
+     * {@code padding-left}（分别折算行/列间距），最后指定宽度占比。
+     */
+    private static String layoutCellStyle(int rowIndex, int columnIndex, int gap, double ratio) {
+        StringBuilder style = new StringBuilder("vertical-align:top;box-sizing:border-box;");
+        if (rowIndex > 0 && gap > 0) {
+            style.append("padding-top:").append(gap).append("px;");
+        }
+        if (columnIndex > 0 && gap > 0) {
+            style.append("padding-left:").append(gap).append("px;");
+        }
+        return style.append("width:").append(formatPercent(ratio)).append(";").toString();
+    }
+
+    /** 把 0–1 的宽度占比格式化为百分比（最多两位小数、整数不带小数点）：0.5 → {@code 50%}、1/3 → {@code 33.33%}。 */
+    private static String formatPercent(double ratio) {
+        double percent = Math.round(ratio * 10000) / 100.0;
+        return percent == Math.rint(percent) ? (long) percent + "%" : percent + "%";
+    }
+
+    /** 把源元素的全部子节点按原顺序搬入目标元素（改挂载、不复制）；搬空后的源元素由调用方处置。 */
+    private static void moveChildrenInto(Element source, Element target) {
+        for (Node child : new ArrayList<>(source.childNodes())) {
+            target.appendChild(child);
+        }
+    }
+
+    /**
+     * 组合样式：元素原有内联样式在前、追加样式在后（同名属性以追加样式为准），
+     * 用于必须覆盖既有内联样式的场合（如画廊图片的 {@code height:100%}）。
+     */
+    private static void overrideStyle(Element element, String style) {
+        String existing = element.attr("style");
+        if (existing == null || existing.isBlank()) {
+            element.attr("style", style);
+            return;
+        }
+        element.attr("style", existing.endsWith(";") ? existing + style : existing + ";" + style);
     }
 
     /**
