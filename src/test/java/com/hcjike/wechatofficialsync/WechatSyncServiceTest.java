@@ -16,7 +16,8 @@ import run.halo.app.infra.SystemSetting;
 
 /**
  * {@link WechatSyncService} 的行为验证：原文链接始终按「外部访问地址 + 文章路由」拼接；留言设置按选项映射
- * 并兼容旧开关；预览按与提交一致的规则解析（作者优先级 / 原文链接 / 留言设置 / 正文美化）。
+ * 并兼容旧开关；摘要按 120 字上限截断、空白按未填写处理；预览按与提交一致的规则解析
+ * （作者优先级 / 原文链接 / 留言设置 / 正文美化）。
  */
 class WechatSyncServiceTest {
 
@@ -94,6 +95,7 @@ class WechatSyncServiceTest {
         request.setContent("<p>正文</p>");
         request.setAuthor("文章作者");
         request.setPermalink("/archives/hello");
+        request.setDigest("  文章摘要  ");
         WechatSetting setting = new WechatSetting();
         setting.setAuthor("默认作者");
         setting.setCommentMode(WechatSetting.COMMENT_MODE_FANS);
@@ -103,10 +105,33 @@ class WechatSyncServiceTest {
         assertThat(result).isNotNull();
         // 正文已按美化规则处理（段落被注入内联样式）
         assertThat((String) result.get("content")).contains("<p");
+        // 摘要按与提交一致的规则处理（去除首尾空白），供预览展示
+        assertThat(result.get("digest")).isEqualTo("文章摘要");
         // 作者与提交一致：设置的「默认作者」优先
         assertThat(result.get("author")).isEqualTo("默认作者");
         assertThat(result.get("sourceUrl")).isEqualTo("https://blog.example.com/archives/hello");
         assertThat(result.get("commentMode")).isEqualTo(WechatSetting.COMMENT_MODE_FANS);
+    }
+
+    @Test
+    void digestIsTrimmedAndKeptWholeWithinLimit() {
+        // 未填写（null / 纯空白）视为空摘要：返回空串，草稿不传 digest，由微信默认抓取正文前 54 个字
+        assertThat(WechatSyncService.truncateDigest(null)).isEmpty();
+        assertThat(WechatSyncService.truncateDigest("   ")).isEmpty();
+        assertThat(WechatSyncService.truncateDigest("  简短摘要  ")).isEqualTo("简短摘要");
+        // 正好 120 字保持原样
+        String exact = "摘".repeat(WechatSyncService.MAX_DIGEST_LENGTH);
+        assertThat(WechatSyncService.truncateDigest(exact)).isEqualTo(exact);
+    }
+
+    @Test
+    void digestTruncationCountsCodePoints() {
+        // 超长摘要截断到 120 个字；emoji（代理对）按 1 个字计，且不会被截成半个字符
+        String longText = "摘".repeat(119) + "😀😀";
+        String truncated = WechatSyncService.truncateDigest(longText);
+        assertThat(truncated).isEqualTo("摘".repeat(119) + "😀");
+        assertThat(truncated.codePointCount(0, truncated.length()))
+            .isEqualTo(WechatSyncService.MAX_DIGEST_LENGTH);
     }
 
     @Test
@@ -130,5 +155,7 @@ class WechatSyncServiceTest {
         assertThat(result.get("author")).isEqualTo("文章作者");
         assertThat(result.get("commentMode")).isEqualTo(WechatSetting.COMMENT_MODE_CLOSE);
         assertThat(result.get("sourceUrl")).isEqualTo("");
+        // 未填写摘要时预览返回空串：弹窗不展示摘要条目
+        assertThat(result.get("digest")).isEqualTo("");
     }
 }

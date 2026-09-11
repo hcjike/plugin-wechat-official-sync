@@ -7,7 +7,7 @@ import type { PreviewPayload } from '../utils/syncToWechat'
 const props = defineProps<{
   /** 文章标题（预览中作为图文标题展示）。 */
   title: string
-  /** 拉取美化后的正文与上传后的草稿元信息（作者 / 原文链接 / 留言设置）。 */
+  /** 拉取美化后的正文与上传后的草稿元信息（摘要 / 作者 / 原文链接 / 留言设置）。 */
   loadPreview: () => Promise<PreviewPayload>
   /** 提交同步任务；返回是否成功，失败提示已由调用方发出、弹窗保持打开以便重试。 */
   confirmSync: () => Promise<boolean>
@@ -18,7 +18,7 @@ const emit = defineEmits<{
 }>()
 
 const html = ref('')
-/** 上传后将使用的草稿元信息（作者 / 原文链接 / 留言设置）。 */
+/** 上传后将使用的草稿元信息（摘要 / 作者 / 原文链接 / 留言设置）。 */
 const meta = ref<PreviewPayload | null>(null)
 /** 预览正文滚动区（滚轮 / 触屏手势据此判断放行或拦截）。 */
 const bodyRef = ref<HTMLElement | null>(null)
@@ -264,6 +264,11 @@ onBeforeUnmount(() => {
             <h1 class="sync-preview__title">{{ title }}</h1>
             <div ref="contentRef" class="sync-preview__content" @click="blockLinkNavigation"></div>
           </div>
+          <!-- 摘要：未填写时整块不显示；单独一张卡片，位于正文与草稿元信息（作者等）之间 -->
+          <div v-if="meta?.digest" class="sync-preview__digest">
+            <span class="sync-preview__detail-label">摘要</span>
+            <span class="sync-preview__detail-value">{{ meta.digest }}</span>
+          </div>
           <div class="sync-preview__details">
             <div class="sync-preview__detail">
               <span class="sync-preview__detail-label">作者</span>
@@ -408,6 +413,20 @@ onBeforeUnmount(() => {
   to {
     transform: rotate(360deg);
   }
+}
+
+/* 摘要卡片：未填写时不渲染；单独占一张卡片，与下方草稿元信息卡片分开 */
+.sync-preview__digest {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 16px;
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  background: #fff;
+  border-radius: 6px;
+  box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
 }
 
 /* 上传后草稿的元信息：作者 / 原文链接 / 留言设置，放在正文下方，宽度与正文卡片对齐 */
