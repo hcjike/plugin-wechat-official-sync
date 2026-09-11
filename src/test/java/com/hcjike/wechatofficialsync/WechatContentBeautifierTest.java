@@ -76,6 +76,73 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void removesExternalStylesheetLinks() {
+        // <link> 会加载外部样式资源：预览与草稿都应只按正文自身的行内样式渲染，
+        // 这类外部资源引用一并移除（微信自身也会剥离）
+        String html = "<p>文本</p><link rel=\"stylesheet\" href=\"https://cdn.example.com/theme.css\">";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<link");
+        assertThat(result).doesNotContain("theme.css");
+        assertThat(result).contains("文本");
+    }
+
+    @Test
+    void removesEscapedStyleAndScriptBlockText() {
+        // 从其他平台粘贴/导入的文章常把原始 <style>/<script> 转义成纯文本残留在正文里，
+        // 解析后是普通文本而非元素（标签清理删不到），预览与草稿都不应展示这些源码文本
+        String html = "<p>上文</p>"
+            + "<p>&lt;style&gt;.foo{color:red}&lt;/style&gt;</p>"
+            + "<p>保留&lt;script&gt;alert(1)&lt;/script&gt;结尾</p>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // style/script 块（含其中的 CSS/JS 内容）整体消失
+        assertThat(result).doesNotContain("color:red");
+        assertThat(result).doesNotContain("alert(1)");
+        assertThat(result).doesNotContain("&lt;style");
+        assertThat(result).doesNotContain("&lt;script");
+        // 仅包含块的段落被整体移除（与删掉元素后一致），前后文字原样保留
+        assertThat(result.split("<p ", -1).length - 1).isEqualTo(3);
+        assertThat(result).contains("上文");
+        assertThat(result).contains("保留结尾");
+        assertThat(result).contains("下文");
+    }
+
+    @Test
+    void removesMultipleEscapedBlocksInSameParagraph() {
+        // 同一段落内的多个块（含多行 script）逐一剔除，其余文字保持原样
+        String html = "<p>&lt;style&gt;.a{}&lt;/style&gt;中间&lt;script&gt;\nvar x = 1;\n&lt;/script&gt;末尾</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain(".a{}");
+        assertThat(result).doesNotContain("var x = 1");
+        assertThat(result).contains("中间末尾");
+    }
+
+    @Test
+    void keepsEscapedStyleScriptExamplesInsideCodeBlocks() {
+        // 代码块里的转义标签属于文章示例，必须原样保留
+        String html = "<pre><code class=\"language-html\">&lt;style&gt;\n.foo{}\n&lt;/style&gt;</code></pre>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("&lt;style&gt;");
+        assertThat(result).contains(".foo{}");
+        assertThat(result).contains("&lt;/style&gt;");
+    }
+
+    @Test
+    void keepsLoneStyleScriptMentionsWithoutClosingTag() {
+        // 正文里单独提及标签（无闭合标签）属于正常文字，不做剔除
+        String html = "<p>插件会清理 &lt;style&gt; 与 &lt;script&gt; 标签</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("&lt;style&gt;");
+        assertThat(result).contains("&lt;script&gt;");
+        assertThat(result).contains("插件会清理");
+    }
+
+    @Test
     void codeBlockMatchesWechatNativeStyle() {
         String html = "<pre><code class=\"language-java\">int a = 1;</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);

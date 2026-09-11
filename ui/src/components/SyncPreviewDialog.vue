@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { VButton } from '@halo-dev/components'
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import IconCloseLine from '~icons/ri/close-line'
 import type { PreviewPayload } from '../utils/syncToWechat'
 
@@ -22,6 +22,8 @@ const html = ref('')
 const meta = ref<PreviewPayload | null>(null)
 /** 预览正文滚动区（滚轮 / 触屏手势据此判断放行或拦截）。 */
 const bodyRef = ref<HTMLElement | null>(null)
+/** 正文渲染宿主：正文渲染进它的 Shadow DOM，与 Console 页面样式互相隔离。 */
+const contentRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const submitting = ref(false)
@@ -58,6 +60,98 @@ async function load() {
   }
 }
 
+/**
+ * 正文宿主的补充样式：随正文一起渲染进 Shadow DOM（见 renderContent），
+ * 与页面样式互相隔离、以普通选择器书写（原 scoped CSS 中的 :deep 规则移到这里）。
+ */
+const PREVIEW_CONTENT_STYLES = `<style>
+/* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
+   左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），
+   否则行号列与代码行会散架、所有代码行挤成一行 */
+.code-snippet__fix {
+  display: flex;
+  margin: 0.9em 0;
+  overflow: hidden;
+  font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  color: #333;
+  background: #f7f7f7;
+  border: 1px solid #f0f0f0;
+  border-radius: 4px;
+}
+
+ul.code-snippet__line-index {
+  flex: none;
+  padding: 12px 8px;
+  margin: 0;
+  color: #b2b2b2;
+  text-align: right;
+  list-style: none;
+  counter-reset: line;
+  user-select: none;
+}
+
+ul.code-snippet__line-index li {
+  height: 1.7em;
+  list-style: none;
+}
+
+ul.code-snippet__line-index li::before {
+  counter-increment: line;
+  content: counter(line);
+}
+
+pre.code-snippet__js {
+  flex: 1;
+  min-width: 0;
+  padding: 12px;
+  margin: 0;
+  overflow-x: auto;
+  font-family: inherit;
+  background: transparent;
+  border: none;
+}
+
+pre.code-snippet__js code {
+  display: block;
+  height: 1.7em;
+  font-family: inherit;
+  white-space: pre;
+}
+
+/* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
+   预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
+.wechat-layout-table td {
+  border: 1px solid #e6e6e6;
+}
+
+/* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
+   一个独立表格（一个卡片 = 一个表格），紧贴显示时浅灰边框会连成一片、看起来像一个表格 */
+.wechat-layout-table + .wechat-layout-table {
+  margin-top: 10px;
+}
+</style>`
+
+/**
+ * 把美化后的正文渲染进宿主的 Shadow DOM：页面全局样式影响不到正文，
+ * 正文只按自己的行内样式渲染，正文样式也不会外泄影响页面。
+ */
+function renderContent() {
+  const host = contentRef.value
+  if (!host || !html.value) {
+    return
+  }
+  const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
+  root.innerHTML = PREVIEW_CONTENT_STYLES + html.value
+}
+
+// 正文或加载状态变化后（内容区挂载 / 重建）等 DOM 更新完再渲染
+watch([html, loading], async () => {
+  await nextTick()
+  renderContent()
+})
+
 async function confirm() {
   if (submitting.value || loading.value) {
     return
@@ -80,9 +174,16 @@ function cancel() {
   emit('close')
 }
 
-/** 预览为只读展示：拦截正文内链接的点击跳转。 */
+/**
+ * 预览为只读展示：拦截正文内链接的点击跳转。
+ * 正文位于 Shadow DOM 内，点击事件的目标会被重定向为宿主元素，
+ * 须沿 composedPath 查找真实点击的链接。
+ */
 function blockLinkNavigation(event: MouseEvent) {
-  if ((event.target as HTMLElement)?.closest('a')) {
+  const clickedLink = event
+    .composedPath()
+    .some((node) => node instanceof Element && node.tagName === 'A')
+  if (clickedLink) {
     event.preventDefault()
   }
 }
@@ -161,7 +262,7 @@ onBeforeUnmount(() => {
         <template v-else>
           <div class="sync-preview__phone">
             <h1 class="sync-preview__title">{{ title }}</h1>
-            <div class="sync-preview__content" v-html="html" @click="blockLinkNavigation"></div>
+            <div ref="contentRef" class="sync-preview__content" @click="blockLinkNavigation"></div>
           </div>
           <div class="sync-preview__details">
             <div class="sync-preview__detail">
@@ -400,70 +501,7 @@ onBeforeUnmount(() => {
   }
 }
 
-/* 预览页没有微信图文加载的全局样式，需在这里补齐微信对原生代码块（code-snippet 结构）的渲染：
-   左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），
-   否则行号列与代码行会散架、所有代码行挤成一行 */
-.sync-preview__content :deep(.code-snippet__fix) {
-  display: flex;
-  margin: 0.9em 0;
-  overflow: hidden;
-  font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
-  font-size: 13px;
-  line-height: 1.7;
-  color: #333;
-  background: #f7f7f7;
-  border: 1px solid #f0f0f0;
-  border-radius: 4px;
-}
-
-.sync-preview__content :deep(ul.code-snippet__line-index) {
-  flex: none;
-  padding: 12px 8px;
-  margin: 0;
-  color: #b2b2b2;
-  text-align: right;
-  list-style: none;
-  counter-reset: line;
-  user-select: none;
-}
-
-.sync-preview__content :deep(ul.code-snippet__line-index li) {
-  height: 1.7em;
-  list-style: none;
-}
-
-.sync-preview__content :deep(ul.code-snippet__line-index li::before) {
-  counter-increment: line;
-  content: counter(line);
-}
-
-.sync-preview__content :deep(pre.code-snippet__js) {
-  flex: 1;
-  min-width: 0;
-  padding: 12px;
-  margin: 0;
-  overflow-x: auto;
-  font-family: inherit;
-  background: transparent;
-  border: none;
-}
-
-.sync-preview__content :deep(pre.code-snippet__js code) {
-  display: block;
-  height: 1.7em;
-  font-family: inherit;
-  white-space: pre;
-}
-
-/* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
-   预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
-.sync-preview__content :deep(.wechat-layout-table td) {
-  border: 1px solid #e6e6e6;
-}
-
-/* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
-   一个独立表格（一个卡片 = 一个表格），紧贴显示时浅灰边框会连成一片、看起来像一个表格 */
-.sync-preview__content :deep(.wechat-layout-table + .wechat-layout-table) {
-  margin-top: 10px;
-}
+/* 正文渲染在 .sync-preview__content 的 Shadow DOM 内（与页面样式完全隔离、只按正文自己的
+   行内样式渲染），其专属补充样式——代码块渲染、布局表格预览标记——见脚本中的
+   PREVIEW_CONTENT_STYLES 常量 */
 </style>

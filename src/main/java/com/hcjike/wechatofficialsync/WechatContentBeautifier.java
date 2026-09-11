@@ -11,6 +11,7 @@ import org.jsoup.nodes.Attribute;
 import org.jsoup.nodes.Document;
 import org.jsoup.nodes.Element;
 import org.jsoup.nodes.Node;
+import org.jsoup.nodes.TextNode;
 import org.jsoup.parser.Tag;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -188,6 +189,16 @@ final class WechatContentBeautifier {
     private static final Pattern SIZE_NUMBER = Pattern.compile("([\\d.]+)");
 
     /**
+     * 以<b>转义文本</b>形式残留在正文里的 {@code <style>}/{@code <script>} 块：从其他平台粘贴或
+     * 导入 HTML 文章时，原始标签常被编辑器转义为纯文本（形如 {@code &lt;style&gt;.a{}&lt;/style&gt;}），
+     * 解析后是普通文本而非元素，{@link #sanitize} 的标签选择器删不到，会以可见源码的形式出现在
+     * 预览与草稿中。仅匹配「开标签 + 其中内容 + 闭标签」的完整成对块，无闭合标签的零星提及不动。
+     */
+    private static final Pattern ESCAPED_STYLE_SCRIPT_BLOCK = Pattern.compile(
+        "<style\\b[^>]*>[\\s\\S]*?</style\\s*>|<script\\b[^>]*>[\\s\\S]*?</script\\s*>",
+        Pattern.CASE_INSENSITIVE);
+
+    /**
      * 内容型标签：段落若含这些后代则视为非空，不能被当作空段落删除。
      * 用于区分「仅含 {@code <br>}/空 {@code <span>} 的占位空段落」与「包着图片/表格等内容的段落」。
      */
@@ -217,6 +228,9 @@ final class WechatContentBeautifier {
             return html;
         }
         sanitize(body);
+        // 粘贴/导入的 HTML 常把 <style>/<script> 转义成纯文本残留在正文里（sanitize 按标签删不到），
+        // 预览与草稿都不应展示这些源码文本；在空段落清理前整体剔除，代码块（pre/code）内的示例保留
+        removeEscapedStyleScriptBlocks(body);
         // 转换 Halo 插件注入的自定义 Web Component（链接卡片/下载链接等），微信无法渲染，
         // 需在样式注入前转为标准 <a>/<p>；转换后遗留的空段落交由 removeEmptyParagraphs 清理
         convertPluginCustomElements(body);
@@ -239,11 +253,12 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 安全清理：移除 {@code <script>}/{@code <style>} 等标签与所有 {@code on*} 事件属性。
-     * 微信自身也会剥离，这里主动清理让产物更干净、也避免残留可执行内容。
+     * 安全清理：移除 {@code <script>}/{@code <style>}/{@code <link>} 等标签与所有 {@code on*} 事件属性。
+     * 微信自身也会剥离，这里主动清理让产物更干净、也避免残留可执行内容；
+     * 其中 {@code <link>} 会加载外部样式资源，预览与草稿都不应加载（只按正文自身的行内样式渲染）。
      */
     private static void sanitize(Element body) {
-        body.select("script, style, iframe, object, embed").remove();
+        body.select("script, style, link, iframe, object, embed").remove();
         for (Element element : body.getAllElements()) {
             List<String> eventAttrs = new ArrayList<>();
             for (Attribute attribute : element.attributes()) {
@@ -253,6 +268,45 @@ final class WechatContentBeautifier {
             }
             eventAttrs.forEach(element::removeAttr);
         }
+    }
+
+    /**
+     * 移除正文中以<b>转义文本</b>形式残留的 {@code <style>}/{@code <script>} 块（见
+     * {@link #ESCAPED_STYLE_SCRIPT_BLOCK}）：它们因被编辑器转义而成为普通文本，会以可见源码的
+     * 形式出现在预览与微信草稿中。仅处理正文流中的文本节点，{@code <pre>}/{@code <code>} 内的
+     * 示例代码原样保留；剔除后变为空的段落交由 {@link #removeEmptyParagraphs} 清理。
+     */
+    private static void removeEscapedStyleScriptBlocks(Element body) {
+        for (Element element : body.getAllElements()) {
+            for (Node node : new ArrayList<>(element.childNodes())) {
+                if (!(node instanceof TextNode textNode) || isInsideCode(textNode)) {
+                    continue;
+                }
+                String text = textNode.getWholeText();
+                if (!ESCAPED_STYLE_SCRIPT_BLOCK.matcher(text).find()) {
+                    continue;
+                }
+                String cleaned = ESCAPED_STYLE_SCRIPT_BLOCK.matcher(text).replaceAll("");
+                if (cleaned.isBlank()) {
+                    textNode.remove();
+                } else {
+                    textNode.text(cleaned);
+                }
+            }
+        }
+    }
+
+    /** 判断文本节点是否位于 {@code <pre>}/{@code <code>} 内（其中的转义标签属文章示例，不能剔除）。 */
+    private static boolean isInsideCode(Node node) {
+        Node parent = node.parent();
+        while (parent != null) {
+            if (parent instanceof Element element
+                && ("pre".equalsIgnoreCase(element.tagName()) || "code".equalsIgnoreCase(element.tagName()))) {
+                return true;
+            }
+            parent = parent.parent();
+        }
+        return false;
     }
 
     /**
