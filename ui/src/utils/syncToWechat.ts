@@ -6,6 +6,7 @@ import { loadRecords, setLocalRecord } from '../api/syncStatus'
 
 const SYNC_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/sync'
 const PREVIEW_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/preview'
+const VALIDATE_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/validate'
 
 /** 预览接口返回：美化后的正文与上传后实际使用的草稿元信息。 */
 export interface PreviewPayload {
@@ -21,18 +22,13 @@ export interface PreviewPayload {
   commentMode: string
 }
 
-/** 微信图文摘要（digest）总长度上限：120 个字。 */
-const MAX_DIGEST_LENGTH = 120
-
 /**
  * 读取文章的摘要（Halo「摘要」字段）作为草稿 digest：
  * 空摘要返回空串（服务端不传该字段，由微信默认抓取正文前 54 个字）；
- * 超长时按字符数（码点，emoji 按 1 个字计）截断到 120 个字，避免超出微信接口限制。
+ * 非空时原样上送、不做长度截断，超长摘要完整同步到草稿，由用户在发布时自行取舍。
  */
 function digestOf(post: ListedPost): string {
-  const raw = post.post.spec?.excerpt?.raw?.trim() || ''
-  const chars = [...raw]
-  return chars.length > MAX_DIGEST_LENGTH ? chars.slice(0, MAX_DIGEST_LENGTH).join('') : raw
+  return post.post.spec?.excerpt?.raw?.trim() || ''
 }
 
 /**
@@ -77,6 +73,22 @@ async function fetchPreview(post: ListedPost, content: string): Promise<PreviewP
 }
 
 /**
+ * 同步前预检：微信配置缺失、封面图缺失或无法解析、文章正在同步中等「提交前即可发现」的
+ * 已知错误在打开预览前直接报告；返回需要拦截本次同步的错误提示，空数组表示校验通过。
+ *
+ * 预检接口自身不可用（如网络异常、旧角色未授予 validate 权限的 403）时按通过处理：
+ * 预检只是提前提示、尽力而为，服务端在提交同步时仍会兜底校验，不能因预检故障阻断同步。
+ */
+async function fetchValidationErrors(post: ListedPost): Promise<string[]> {
+  try {
+    const { data } = await axiosInstance.post<{ errors?: string[] }>(VALIDATE_URL, syncFieldsOf(post))
+    return Array.isArray(data?.errors) ? data.errors : []
+  } catch {
+    return []
+  }
+}
+
+/**
  * 提交同步任务。
  */
 async function submitSync(post: ListedPost, content: string) {
@@ -105,16 +117,23 @@ function serverErrorMessage(error: unknown): string {
 }
 
 /**
- * 打开「同步预览」弹窗：先展示美化后的正文（上传到公众号后的大致效果），
- * 用户确认后才提交同步任务；取消则直接关闭、不提交。
+ * 「同步到微信公众号」入口：先调用预检接口验证微信配置、封面图与同步状态等已知错误，
+ * 有问题直接报告并中止（不打开预览、不提交）；校验通过后才打开「同步预览」弹窗——
+ * 弹窗先展示美化后的正文（上传到公众号后的大致效果），用户确认后才提交同步任务；取消则直接关闭、不提交。
  *
  * 弹窗用 createApp 命令式挂载到 body：操作项组件被 Halo 渲染在下拉菜单的 popper 内，
  * 点击菜单项后 popper 会立即关闭，内嵌的 VModal（默认不 Teleport 到 body）会一并不可见；
  * 挂载到 body 的弹窗不受 popper 影响，行为与 Dialog 命令式 API 一致。
  */
-export function confirmSyncToWechat(post: ListedPost) {
+export async function confirmSyncToWechat(post: ListedPost) {
   if (!post?.post?.metadata?.name) {
     Toast.error('无法获取文章信息，请刷新页面后重试')
+    return
+  }
+  // 基础预检：不通过时直接提示错误并中止，不进入预览与同步流程
+  const errors = await fetchValidationErrors(post)
+  if (errors.length > 0) {
+    Toast.error(errors.join('；'))
     return
   }
   const title = post.post.spec?.title || '（无标题）'

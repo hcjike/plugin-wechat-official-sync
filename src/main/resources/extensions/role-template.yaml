@@ -20,6 +20,10 @@ rules:
   - apiGroups: ["api.wechat-sync.halo.run"]
     resources: ["sync"]
     verbs: ["create"]
+  # 同步前预检（微信配置 / 封面图 / 同步状态）：POST /apis/api.wechat-sync.halo.run/v1alpha1/validate
+  - apiGroups: ["api.wechat-sync.halo.run"]
+    resources: ["validate"]
+    verbs: ["create"]
   # 预览正文美化效果：POST /apis/api.wechat-sync.halo.run/v1alpha1/preview
   - apiGroups: ["api.wechat-sync.halo.run"]
     resources: ["preview"]
