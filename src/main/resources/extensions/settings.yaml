@@ -169,3 +169,25 @@ spec:
           help: H6 标题左侧强调边框的颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
+        - $formkit: select
+          name: columnsLayoutStyle
+          id: columnsLayoutStyle
+          label: 分栏卡片版式
+          value: "table"
+          options:
+            - value: "table"
+              label: 表格
+            - value: "stacked"
+              label: 独占一行
+          help: 表格：分栏卡片各列并排（重建为微信兼容的表格布局，推荐）；独占一行：不重建表格，每栏各占一行，栏内内容照常保留。
+        - $formkit: select
+          name: galleryLayoutStyle
+          id: galleryLayoutStyle
+          label: 画廊版式
+          value: "table"
+          options:
+            - value: "table"
+              label: 表格
+            - value: "stacked"
+              label: 独占一行
+          help: 表格：画廊多图并排（重建为一张整体表格、所有列等宽，推荐）；独占一行：不重建表格，每张图片各占一行，图片与描述内容照常保留。

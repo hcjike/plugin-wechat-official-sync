@@ -17,6 +17,12 @@ public class BeautifySetting {
 
     public static final String GROUP = "beautify";
 
+    /** {@link #columnsLayoutStyle} / {@link #galleryLayoutStyle} 取值：重建为表格（默认）——分栏各列并排、画廊多图并排。 */
+    public static final String LAYOUT_STYLE_TABLE = "table";
+
+    /** {@link #columnsLayoutStyle} / {@link #galleryLayoutStyle} 取值：独占一行——分栏每栏一行、画廊每张图片一行。 */
+    public static final String LAYOUT_STYLE_STACKED = "stacked";
+
     /** 正文文字颜色（段落、列表、表格正文与根节点）。 */
     private String textColor = "#3f3f3f";
 
@@ -73,4 +79,16 @@ public class BeautifySetting {
 
     /** 六级标题左侧强调边框颜色（需开启 {@link #headingBorderEnabled}）。默认微信绿。 */
     private String h6BorderColor = "#07c160";
+
+    /**
+     * 分栏卡片的同步版式：{@link #LAYOUT_STYLE_TABLE}（默认，重建为表格、各列并排）或
+     * {@link #LAYOUT_STYLE_STACKED}（独占一行——每栏一行，栏内内容照常保留）。取值非法时按表格处理。
+     */
+    private String columnsLayoutStyle = LAYOUT_STYLE_TABLE;
+
+    /**
+     * 画廊的同步版式：{@link #LAYOUT_STYLE_TABLE}（默认，重建为表格、多图并排）或
+     * {@link #LAYOUT_STYLE_STACKED}（独占一行——每张图片一行，图片与描述内容照常保留）。取值非法时按表格处理。
+     */
+    private String galleryLayoutStyle = LAYOUT_STYLE_TABLE;
 }

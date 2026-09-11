@@ -773,4 +773,126 @@ class WechatContentBeautifierTest {
         assertThat(result).contains("文字");
         assertThat(result).contains("<img");
     }
+
+    @Test
+    void stackedLayoutFlattensColumnsToOnePerLine() {
+        // 分栏版式「独占一行」：分栏不重建表格，取消 flex 并排、恢复块级——两栏各占一行
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle(BeautifySetting.LAYOUT_STYLE_STACKED);
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" index=\"0\" style=\"min-width: 0;flex: 2 1;box-sizing: border-box;\">"
+            + "<p>左栏</p></div>"
+            + "<div class=\"column\" index=\"1\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\">"
+            + "<p>右栏</p></div>"
+            + "</div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 不生成布局表格，也不残留任何 flex 布局样式
+        assertThat(result).doesNotContain("<table");
+        assertThat(result).doesNotContain("wechat-layout-table");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("flex: 2 1");
+        // 容器与各列恢复为普通块级，栏内内容完整保留
+        assertThat(result).contains("display:block;");
+        assertThat(result).contains("左栏");
+        assertThat(result).contains("右栏");
+    }
+
+    @Test
+    void stackedLayoutFlattensGalleryToOneImagePerLine() {
+        // 画廊版式「独占一行」：画廊不重建表格，网格/分组/图片项全部恢复为块级——每张图片各占一行；
+        // 图片与描述（figcaption）内容完整保留，相邻图片间距按 data-gap 折算为 margin-bottom
+        BeautifySetting setting = new BeautifySetting();
+        setting.setGalleryLayoutStyle("stacked");
+        String html = "<div data-type=\"gallery\" data-group-size=\"2\" data-layout=\"auto\" data-gap=\"8\">"
+            + "<div style=\"display: grid; gap: 8px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\">"
+            + "<figcaption>第一张的描述</figcaption></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/b.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/c.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "</div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 不生成布局表格，grid/flex 布局样式全部清除
+        assertThat(result).doesNotContain("<table");
+        assertThat(result).doesNotContain("display: grid");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("flex-direction");
+        // 三张图片与描述内容保留；描述沿用图片描述样式（居中灰色斜体）
+        int images = result.split("<img ", -1).length - 1;
+        assertThat(images).isEqualTo(3);
+        assertThat(result).contains("第一张的描述");
+        assertThat(result).contains("font-style:italic");
+        // 图片改回自动高度（原 height:100% 仅适合 flex 撑高），相邻图片保留原间距
+        assertThat(result).contains("height:auto");
+        assertThat(result).contains("margin-bottom:8px");
+    }
+
+    @Test
+    void invalidLayoutStyleFallsBackToTableLayout() {
+        // 两项版式取值非法（历史残留、手工改错等）时均按默认「表格」处理，保证同步流程不中断
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle("masonry");
+        setting.setGalleryLayoutStyle("masonry");
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>左</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>右</p></div>"
+            + "</div>"
+            + "<div data-type=\"gallery\" data-group-size=\"1\" data-layout=\"auto\" data-gap=\"0\">"
+            + "<div style=\"display: grid; gap: 0px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 0px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div></div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 分栏与画廊都按「表格」重建（各一个布局表格），无 grid/flex 残留
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(2);
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("display: grid");
+    }
+
+    @Test
+    void columnsAndGalleryLayoutStylesAreIndependent() {
+        // 两项配置相互独立：分栏「独占一行」时画廊仍保持默认「表格」，只影响各自区块
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle(BeautifySetting.LAYOUT_STYLE_STACKED);
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>左栏</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>右栏</p></div>"
+            + "</div>"
+            + "<div data-type=\"gallery\" data-group-size=\"2\" data-layout=\"auto\" data-gap=\"4\">"
+            + "<div style=\"display: grid; gap: 4px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 4px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/b.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div></div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 分栏保持块级堆叠（未重建表格），画廊仍重建为一张布局表格；内容与图片全部保留
+        assertThat(result).contains("display:block;");
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(1);
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).contains("左栏");
+        assertThat(result).contains("右栏");
+        int images = result.split("<img ", -1).length - 1;
+        assertThat(images).isEqualTo(2);
+    }
 }

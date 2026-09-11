@@ -201,7 +201,7 @@ final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     static String beautify(String html, BeautifySetting config) {
@@ -232,9 +232,9 @@ final class WechatContentBeautifier {
         buildTables(body);
         injectStyles(body, cfg);
         wrapWithBase(body, cfg);
-        // 分栏卡片与画廊须在流程最后由表格布局重建：微信会过滤 display:grid、flex 支持不稳定，直接同步会导致
-        // 各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
-        rebuildBlockLayouts(body);
+        // 分栏卡片与画廊按各自配置重建版式（表格/独占一行）：微信会过滤 display:grid、flex 支持不稳定，
+        // 直接同步会导致各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
+        rebuildBlockLayouts(body, cfg);
         return body.html();
     }
 
@@ -665,20 +665,30 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 把 Halo 编辑器的「分栏卡片」与「画廊」区块重建为表格布局。
+     * 按配置重建 Halo 编辑器的「分栏卡片」与「画廊」区块版式——{@link BeautifySetting#getColumnsLayoutStyle()}
+     * 与 {@link BeautifySetting#getGalleryLayoutStyle()} 两项配置相互独立：<b>表格</b>（默认）——重建为微信
+     * 渲染最可靠的 {@code <table>} 布局（见 {@link #rebuildColumns} 与 {@link #rebuildGallery}）；
+     * <b>独占一行</b>——不重建表格而是取消并排、按块级流堆叠（见 {@link #flattenColumns} 与
+     * {@link #flattenGallery}）。取值非法时按默认「表格」处理。
      *
      * <p>Halo 编辑器输出的分栏依赖 {@code display:flex}、画廊依赖 {@code display:grid}+flex 排布，
      * 但微信图文会过滤 {@code display:grid}、对 {@code display:flex} 的支持也不稳定，直接同步会让
-     * 各列/各图纵向堆叠、各占一行。故把这些区块重建为微信渲染最可靠的 {@code <table>} 布局：
-     * 分栏卡片重建为一个单行表格（每列一个单元格，列宽按列的 {@code flex} 比例分配）；
-     * 画廊重建为一个整体表格、所有列等宽（见 {@link #rebuildGallery}）。</p>
+     * 各列/各图纵向堆叠、各占一行。</p>
      *
      * <p>须在整个美化流程最后执行（见 {@link #beautify}）：布局表格不再参与通用 {@code table/td}
      * 样式注入，也不会被 {@link #buildTables} 包上横向滚动容器（其宽度恒为 100%，无需滚动兜底）。</p>
      */
-    private static void rebuildBlockLayouts(Element body) {
-        rebuildColumns(body);
-        rebuildGallery(body);
+    private static void rebuildBlockLayouts(Element body, BeautifySetting cfg) {
+        if (BeautifySetting.LAYOUT_STYLE_STACKED.equalsIgnoreCase(cfg.getColumnsLayoutStyle())) {
+            flattenColumns(body);
+        } else {
+            rebuildColumns(body);
+        }
+        if (BeautifySetting.LAYOUT_STYLE_STACKED.equalsIgnoreCase(cfg.getGalleryLayoutStyle())) {
+            flattenGallery(body);
+        } else {
+            rebuildGallery(body);
+        }
     }
 
     /**
@@ -767,6 +777,56 @@ final class WechatContentBeautifier {
                 overrideStyle(img, GALLERY_IMG_STYLE);
             }
             gallery.replaceWith(table);
+        }
+    }
+
+    /**
+     * 分栏卡片「独占一行」版式：容器与各列恢复为普通块级——每栏各占一行，栏内图片、描述等内容完整保留。
+     *
+     * <p>微信对 {@code display:flex} 的支持不稳定，仅删除 flex 声明无法保证一定不并排：这里把容器的内联
+     * 样式整体重写为块级 {@code display:block;}（丢弃 flex/gap/min-width 等纯布局声明）。</p>
+     */
+    private static void flattenColumns(Element body) {
+        for (Element container : body.select("div.columns, div[data-type=columns]")) {
+            container.attr("style", "display:block;");
+            for (Element column : columnChildren(container)) {
+                column.removeAttr("style");
+            }
+        }
+    }
+
+    /**
+     * 画廊「独占一行」版式：网格容器与每个分组恢复为块级——每张图片各占一行；图片与描述等内容节点
+     * 原样保留，照常参与通用美化。
+     *
+     * <p>微信过滤 {@code display:grid}、对 {@code display:flex} 支持不稳定：网格层与分组的内联样式整体
+     * 重写为块级 {@code display:block;}。画廊图片覆写为自动高度（见 {@link #GALLERY_IMG_STYLE}），相邻
+     * 图片之间保留原 {@code data-gap} 作为纵向间距。</p>
+     */
+    private static void flattenGallery(Element body) {
+        for (Element gallery : body.select("div[data-type=gallery]")) {
+            for (Element gridLayer : gallery.children()) {
+                if ("div".equalsIgnoreCase(gridLayer.tagName())) {
+                    gridLayer.attr("style", "display:block;");
+                }
+            }
+            int gap = galleryGapPx(gallery.attr("data-gap"));
+            List<Element> items = new ArrayList<>();
+            for (Element group : gallery.select("div[data-type=gallery-group]")) {
+                group.attr("style", "display:block;");
+                items.addAll(group.children());
+            }
+            for (int i = 0; i < items.size(); i++) {
+                // 原 flex 项样式对块级无意义，重写为与下一张图片的纵向间距（最后一张无需间距）
+                if (i < items.size() - 1 && gap > 0) {
+                    items.get(i).attr("style", "margin-bottom:" + gap + "px;");
+                } else {
+                    items.get(i).removeAttr("style");
+                }
+            }
+            for (Element img : gallery.select("img")) {
+                overrideStyle(img, GALLERY_IMG_STYLE);
+            }
         }
     }
 
