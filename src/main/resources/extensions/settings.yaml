@@ -75,11 +75,25 @@ spec:
           help: 行内 code 的背景色
           value: "#f2f3f5"
           validation: required
+        - $formkit: switch
+          onValue: true
+          offValue: false
+          name: blockquoteBorderEnabled
+          id: blockquoteBorderEnabled
+          label: 引用块显示边框
+          value: true
+          help: 关闭后引用块不显示左侧强调边框（边框颜色见下方「引用块边框颜色」）
         - $formkit: color
           name: themeColor
           label: 引用块边框颜色
           help: 引用块左侧强调边框的颜色
           value: "#07c160"
+          validation: required
+        - $formkit: color
+          name: blockquoteBgColor
+          label: 引用块背景色
+          help: 引用块（含块内文字区域）的背景颜色
+          value: "#f7f7f7"
           validation: required
         - $formkit: switch
           onValue: true

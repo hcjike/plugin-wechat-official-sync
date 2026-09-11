@@ -29,8 +29,14 @@ public class BeautifySetting {
     /** 行内代码底色。 */
     private String inlineCodeBgColor = "#f2f3f5";
 
+    /** 是否显示引用块左侧强调边框。默认开启。 */
+    private boolean blockquoteBorderEnabled = true;
+
     /** 引用块左侧强调边框颜色（十六进制）。默认微信绿。 */
     private String themeColor = "#07c160";
+
+    /** 引用块背景颜色。默认浅灰。 */
+    private String blockquoteBgColor = "#f7f7f7";
 
     /** 是否给 H2–H6 标题显示左侧强调边框（H1 居中不加边框）。默认关闭。 */
     private boolean headingBorderEnabled = false;

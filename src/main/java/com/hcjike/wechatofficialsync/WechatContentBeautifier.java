@@ -69,6 +69,9 @@ final class WechatContentBeautifier {
     /** 未配置或非法主题色时使用的内置强调色（微信绿）。 */
     private static final String DEFAULT_ACCENT = "#07c160";
 
+    /** 未配置或非法时使用的内置默认引用块背景色（浅灰）。 */
+    private static final String DEFAULT_BLOCKQUOTE_BG_COLOR = "#f7f7f7";
+
     /** H1–H6 未配置或非法时的内置默认文字颜色（下标 0 对应 H1）。 */
     private static final String[] DEFAULT_HEADING_COLORS =
         {"#222222", "#222222", "#222222", "#222222", "#333333", "#888888"};
@@ -152,7 +155,7 @@ final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     static String beautify(String html, BeautifySetting config) {
@@ -443,7 +446,8 @@ final class WechatContentBeautifier {
         applyAll(body, "h6", headingStyle("font-size:14px;margin:1.1em 0 0.5em;",
             color(cfg.getH6Color(), DEFAULT_HEADING_COLORS[5]),
             headingBorderCss(headingBorder, cfg.getH6BorderColor())));
-        applyAll(body, "blockquote", blockquoteStyle(accent));
+        applyAll(body, "blockquote", blockquoteStyle(cfg.isBlockquoteBorderEnabled(), accent,
+            color(cfg.getBlockquoteBgColor(), DEFAULT_BLOCKQUOTE_BG_COLOR)));
         applyAllSkippingCodeBlocks(body, "ul", UL_STYLE);
         applyAll(body, "ol", OL_STYLE);
         applyAllSkippingCodeBlocks(body, "li", liStyle(textColor));
@@ -625,9 +629,12 @@ final class WechatContentBeautifier {
         body.appendChild(wrapper);
     }
 
-    private static String blockquoteStyle(String accent) {
-        return "margin:1em 0;padding:10px 15px;border-left:4px solid " + accent + ";background:#f7f7f7;"
-            + "color:#666666;border-radius:0 4px 4px 0;";
+    private static String blockquoteStyle(boolean borderEnabled, String accent, String bgColor) {
+        // 关闭边框时左侧无描边，四角统一圆角更协调；开启时左侧直角贴合边框
+        return "margin:1em 0;padding:10px 15px;"
+            + (borderEnabled ? "border-left:4px solid " + accent + ";" : "")
+            + "background:" + bgColor + ";color:#666666;border-radius:"
+            + (borderEnabled ? "0 4px 4px 0" : "4px") + ";";
     }
 
     /** 正文根节点基础排版：字体、字号、行高与可配置正文色，供未显式覆盖的后代继承。 */

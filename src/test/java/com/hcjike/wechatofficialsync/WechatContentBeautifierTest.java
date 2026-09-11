@@ -289,6 +289,55 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void blockquoteBgColorIsConfigurableAndDecoupledFromTheme() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setBlockquoteBgColor("#eef5ff");
+        cfg.setThemeColor("#ff5500");
+        String html = "<blockquote><p>引用</p></blockquote>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        // 引用块背景色可配（默认 #f7f7f7 被覆盖），与边框主题色互不影响
+        assertThat(result).contains("background:#eef5ff");
+        assertThat(result).contains("border-left:4px solid #ff5500");
+        assertThat(result).doesNotContain("#f7f7f7");
+    }
+
+    @Test
+    void invalidBlockquoteBgColorFallsBackToDefault() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setBlockquoteBgColor("oops");
+        String html = "<blockquote><p>引用</p></blockquote>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        // 非法色值回退到内置默认浅灰，避免污染 style
+        assertThat(result).contains("background:#f7f7f7");
+        assertThat(result).doesNotContain("oops");
+    }
+
+    @Test
+    void blockquoteBorderShownByDefault() {
+        String html = "<blockquote><p>引用</p></blockquote>";
+        String result = WechatContentBeautifier.beautify(html, new BeautifySetting());
+
+        // 默认开启：引用块显示左侧强调边框，左侧两角直角贴合边框
+        assertThat(result).contains("border-left:4px solid #07c160");
+        assertThat(result).contains("border-radius:0 4px 4px 0");
+    }
+
+    @Test
+    void blockquoteBorderCanBeDisabled() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setBlockquoteBorderEnabled(false);
+        String html = "<blockquote><p>引用</p></blockquote>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        // 关闭后无左侧边框，背景色照常生效；无边框时四角统一圆角
+        assertThat(result).doesNotContain("border-left");
+        assertThat(result).contains("background:#f7f7f7");
+        assertThat(result).contains("border-radius:4px");
+    }
+
+    @Test
     void h2BorderColorIsConfigurableAndDecoupledFromTheme() {
         BeautifySetting cfg = new BeautifySetting();
         cfg.setHeadingBorderEnabled(true);
