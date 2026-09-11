@@ -333,9 +333,12 @@ onBeforeUnmount(() => {
   left: 50%;
   display: flex;
   flex-direction: column;
-  width: 640px;
-  max-width: calc(100vw - 32px);
-  max-height: min(82vh, 720px);
+  /* 宽度收窄、高度加高，更接近手机图文的窄长屏观感 */
+  width: 560px;
+  max-width: calc(100vw - 24px);
+  /* 高度上限约 92% 视口且不超过 880px；dvh 兼容手机浏览器动态工具栏，避免弹窗超出屏幕 */
+  max-height: min(92vh, 880px);
+  max-height: min(92dvh, 880px);
   overflow: hidden;
   background: #fff;
   border-radius: 8px;
@@ -513,8 +516,14 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* 窄屏（手机操作 Console）：收紧文章内边距，让正文尽量占满可用宽度 */
+/* 窄屏（手机操作 Console）：弹窗接近全屏、四周留 8px 边距（不超出屏幕）；收紧文章内边距，让正文尽量占满可用宽度 */
 @media (max-width: 520px) {
+  .sync-preview__panel {
+    max-width: calc(100vw - 16px);
+    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - 16px);
+  }
+
   .sync-preview__phone {
     padding: 20px 12px;
   }

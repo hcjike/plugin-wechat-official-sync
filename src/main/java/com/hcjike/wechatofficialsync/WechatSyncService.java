@@ -2,7 +2,9 @@ package com.hcjike.wechatofficialsync;
 
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -85,8 +87,8 @@ public class WechatSyncService {
      * 但不做任何写操作——不下载/转存图片、不上传封面、不调用微信接口、不写同步记录。
      *
      * <p>返回的 {@code content}（美化后的正文）、{@code digest}（草稿摘要，按与提交一致的规则
-     * 截断；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}（草稿作者，设置的
-     * 「默认作者」优先、留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}
+     * 去除首尾空白、原样同步；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}
+     * （草稿作者，设置的「默认作者」优先、留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}
      * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后
      * 实际写入草稿的值。</p>
      */
@@ -101,12 +103,79 @@ public class WechatSyncService {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
                         // 摘要按与提交一致的规则解析：空表示不传 digest（微信默认抓取正文前 54 个字）
-                        result.put("digest", truncateDigest(request.getDigest()));
+                        result.put("digest", trimDigest(request.getDigest()));
                         result.put("author", firstNonBlank(cfg.getAuthor(), request.getAuthor()));
                         result.put("sourceUrl", resolveSourceUrl(permalink, baseUrl));
                         result.put("commentMode", resolveCommentMode(cfg));
                         return result;
                     })));
+    }
+
+    /**
+     * 同步前的本地预检（不调用微信接口、不写同步记录）：收集「微信配置缺失（AppID / AppSecret）、
+     * 封面图缺失或无法解析」等提交前即可发现的已知错误，供 Console 在打开预览前直接报告；
+     * 返回空列表表示校验通过、可继续进入预览 / 同步流程。
+     *
+     * <p>校验规则与提交时一致：AppSecret 按「配置的 Secret 名称 → Secret 资源 → 约定键」解析（仅读取）；
+     * 封面按「存在且可解析为绝对地址」检查（相对地址需要站点「外部访问地址」兜底拼接）。</p>
+     */
+    public Mono<List<String>> validate(SyncRequest request, WechatSetting setting) {
+        WechatSetting cfg = setting == null ? new WechatSetting() : setting;
+        List<String> errors = new ArrayList<>();
+        boolean hasAppId = !isBlank(cfg.getAppId());
+        boolean hasSecretName = !isBlank(cfg.getAppSecretName());
+        if (!hasAppId && !hasSecretName) {
+            // AppID 与 AppSecret 都未配置：合并为一条提示，避免两条几乎相同的消息
+            errors.add("插件尚未配置微信公众号信息，请先在插件设置中配置 AppID / AppSecret");
+            return collectCoverIssues(request, errors);
+        }
+        if (!hasAppId) {
+            errors.add("请先在插件设置中配置公众号 AppID");
+        }
+        return appSecretIssue(cfg.getAppSecretName())
+            .flatMap(issue -> {
+                if (!issue.isEmpty()) {
+                    errors.add(issue);
+                }
+                return collectCoverIssues(request, errors);
+            });
+    }
+
+    /**
+     * AppSecret 预检：返回问题说明；配置可正常解析出 AppSecret 明文时返回空串。
+     * 规则与 {@link #resolveAppSecret(WechatSetting)} 一致（名称 → Secret → 约定键），仅读取校验。
+     */
+    private Mono<String> appSecretIssue(String secretName) {
+        if (isBlank(secretName)) {
+            return Mono.just("请先在插件设置中配置公众号 AppSecret");
+        }
+        return client.fetch(Secret.class, secretName)
+            // 无问题用空串表示：Reactor 的 map 返回 null 会变成空信号，与下方「Secret 不存在」混淆
+            .map(secret -> {
+                String value = extractAppSecret(secret);
+                return value == null || value.isBlank()
+                    ? "Secret「" + secretName + "」中未包含 AppSecret（键 " + WechatSetting.APP_SECRET_KEY
+                        + "），请在插件设置中重新配置"
+                    : "";
+            })
+            .defaultIfEmpty(
+                "未找到保存 AppSecret 的 Secret「" + secretName + "」，请在插件设置中重新填写 AppSecret");
+    }
+
+    /**
+     * 封面预检：封面缺失或无法解析为绝对地址时追加问题，返回收集的问题列表
+     * （与提交时的封面校验同一规则，见 {@link #uploadCover(String, String, String, String)}）。
+     */
+    private Mono<List<String>> collectCoverIssues(SyncRequest request, List<String> errors) {
+        return resolveExternalBaseUrl().map(baseUrl -> {
+            String cover = request.getCover();
+            if (isBlank(cover)) {
+                errors.add("当前文章未设置封面图，请先为文章设置封面后再同步");
+            } else if (resolveUrl(cover, baseUrl) == null) {
+                errors.add("无法解析封面图地址「" + cover + "」，相对地址需先在 Halo 基本设置中配置「外部访问地址」");
+            }
+            return errors;
+        });
     }
 
     /**
@@ -122,7 +191,7 @@ public class WechatSyncService {
      */
     private Mono<String> resolveAppSecret(WechatSetting setting) {
         String secretName = setting.getAppSecretName();
-        if (secretName == null || secretName.isBlank()) {
+        if (isBlank(secretName)) {
             return Mono.error(new WechatApiException("请先在插件设置中配置公众号 AppSecret"));
         }
         return client.fetch(Secret.class, secretName)
@@ -172,8 +241,8 @@ public class WechatSyncService {
         article.put("title", request.getTitle() == null ? "" : request.getTitle());
         // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
         article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
-        // 摘要：读取文章摘要；为空时不传 digest（微信默认抓取正文前 54 个字），非空时最长 120 字
-        String digest = truncateDigest(request.getDigest());
+        // 摘要：读取文章摘要并原样同步（不截断，由用户发布时自行取舍）；为空时不传 digest（微信默认抓取正文前 54 个字）
+        String digest = trimDigest(request.getDigest());
         if (!digest.isEmpty()) {
             article.put("digest", digest);
         }
@@ -190,23 +259,13 @@ public class WechatSyncService {
         return article;
     }
 
-    /** 微信图文摘要（{@code digest}）总长度上限：120 个字。 */
-    static final int MAX_DIGEST_LENGTH = 120;
-
     /**
-     * 规范化草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
-     * {@code digest}，由微信默认抓取正文前 54 个字）；超长时按码点截断到
-     * {@link #MAX_DIGEST_LENGTH} 个字，避免把 emoji 等增补字符截成半个代理对。
+     * 整理草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
+     * {@code digest}，由微信默认抓取正文前 54 个字）；非空则原样返回、不做长度截断，
+     * 超长摘要完整同步到公众号草稿，由用户在发布时自行取舍保留哪部分。
      */
-    static String truncateDigest(String digest) {
-        if (digest == null || digest.isBlank()) {
-            return "";
-        }
-        String trimmed = digest.trim();
-        if (trimmed.codePointCount(0, trimmed.length()) <= MAX_DIGEST_LENGTH) {
-            return trimmed;
-        }
-        return trimmed.substring(0, trimmed.offsetByCodePoints(0, MAX_DIGEST_LENGTH));
+    static String trimDigest(String digest) {
+        return digest == null ? "" : digest.trim();
     }
 
     /**
@@ -287,7 +346,7 @@ public class WechatSyncService {
     private Mono<String> uploadCover(String apiBase, String token, String cover, String baseUrl) {
         String url = resolveUrl(cover, baseUrl);
         if (url == null) {
-            String reason = (cover == null || cover.isBlank())
+            String reason = isBlank(cover)
                 ? "当前文章未设置封面图"
                 : "无法解析封面图地址「" + cover + "」（相对地址需先在 Halo 基本设置中配置「外部访问地址」）";
             return Mono.error(new WechatApiException("微信公众号草稿必须包含封面图，但" + reason + "，请处理后重试"));
@@ -405,9 +464,14 @@ public class WechatSyncService {
         return name.isBlank() ? "image.jpg" : name;
     }
 
+    /** 空值判断（null 或纯空白）。 */
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
+    }
+
     private static String firstNonBlank(String... values) {
         for (String value : values) {
-            if (value != null && !value.isBlank()) {
+            if (!isBlank(value)) {
                 return value;
             }
         }
