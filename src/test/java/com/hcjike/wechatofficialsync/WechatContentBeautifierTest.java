@@ -76,6 +76,73 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void removesExternalStylesheetLinks() {
+        // <link> 会加载外部样式资源：预览与草稿都应只按正文自身的行内样式渲染，
+        // 这类外部资源引用一并移除（微信自身也会剥离）
+        String html = "<p>文本</p><link rel=\"stylesheet\" href=\"https://cdn.example.com/theme.css\">";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<link");
+        assertThat(result).doesNotContain("theme.css");
+        assertThat(result).contains("文本");
+    }
+
+    @Test
+    void removesEscapedStyleAndScriptBlockText() {
+        // 从其他平台粘贴/导入的文章常把原始 <style>/<script> 转义成纯文本残留在正文里，
+        // 解析后是普通文本而非元素（标签清理删不到），预览与草稿都不应展示这些源码文本
+        String html = "<p>上文</p>"
+            + "<p>&lt;style&gt;.foo{color:red}&lt;/style&gt;</p>"
+            + "<p>保留&lt;script&gt;alert(1)&lt;/script&gt;结尾</p>"
+            + "<p>下文</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // style/script 块（含其中的 CSS/JS 内容）整体消失
+        assertThat(result).doesNotContain("color:red");
+        assertThat(result).doesNotContain("alert(1)");
+        assertThat(result).doesNotContain("&lt;style");
+        assertThat(result).doesNotContain("&lt;script");
+        // 仅包含块的段落被整体移除（与删掉元素后一致），前后文字原样保留
+        assertThat(result.split("<p ", -1).length - 1).isEqualTo(3);
+        assertThat(result).contains("上文");
+        assertThat(result).contains("保留结尾");
+        assertThat(result).contains("下文");
+    }
+
+    @Test
+    void removesMultipleEscapedBlocksInSameParagraph() {
+        // 同一段落内的多个块（含多行 script）逐一剔除，其余文字保持原样
+        String html = "<p>&lt;style&gt;.a{}&lt;/style&gt;中间&lt;script&gt;\nvar x = 1;\n&lt;/script&gt;末尾</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain(".a{}");
+        assertThat(result).doesNotContain("var x = 1");
+        assertThat(result).contains("中间末尾");
+    }
+
+    @Test
+    void keepsEscapedStyleScriptExamplesInsideCodeBlocks() {
+        // 代码块里的转义标签属于文章示例，必须原样保留
+        String html = "<pre><code class=\"language-html\">&lt;style&gt;\n.foo{}\n&lt;/style&gt;</code></pre>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("&lt;style&gt;");
+        assertThat(result).contains(".foo{}");
+        assertThat(result).contains("&lt;/style&gt;");
+    }
+
+    @Test
+    void keepsLoneStyleScriptMentionsWithoutClosingTag() {
+        // 正文里单独提及标签（无闭合标签）属于正常文字，不做剔除
+        String html = "<p>插件会清理 &lt;style&gt; 与 &lt;script&gt; 标签</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("&lt;style&gt;");
+        assertThat(result).contains("&lt;script&gt;");
+        assertThat(result).contains("插件会清理");
+    }
+
+    @Test
     void codeBlockMatchesWechatNativeStyle() {
         String html = "<pre><code class=\"language-java\">int a = 1;</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);
@@ -553,6 +620,23 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void figureCaptionIsKeptAsItalicImageDescription() {
+        // Halo 图片「描述」渲染为 <figure> 内的 <figcaption>，编辑器里默认显示为居中灰色斜体小字；
+        // figure 降级为 <p> 后，描述文字与斜体样式须保留
+        String html = "<figure data-content-type=\"image\" style=\"display: flex; flex-direction: column\">"
+            + "<img src=\"https://x/a.png\">"
+            + "<figcaption data-placeholder=\"Add description\">图片描述文字</figcaption>"
+            + "</figure>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<figure");
+        assertThat(result).contains("<figcaption");
+        assertThat(result).contains("图片描述文字");
+        assertThat(result).contains("font-style:italic");
+        assertThat(result).contains("text-align:center");
+    }
+
+    @Test
     void summaryIsDowngradedToParagraphAndKeepsText() {
         // 单独的 <summary>（无 <details> 父）微信不识别，应降级为 <p> 并保留其文字
         String html = "<summary><span leaf=\"\">百度云盘下载，约34.14GB</span></summary>";
@@ -590,5 +674,292 @@ class WechatContentBeautifierTest {
         assertThat(result).doesNotContain("download-links");
         assertThat(result).contains("<a href=\"https://x/f.zip\"");
         assertThat(result).contains("f.zip");
+    }
+
+    @Test
+    void columnsAreRebuiltAsTableLayout() {
+        // Halo 分栏卡片靠 display:flex 并排，微信不支持会导致每列各占一行，应重建为表格布局
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" index=\"0\" style=\"min-width: 0;flex: 2 1;box-sizing: border-box;\">"
+            + "<p>左栏</p></div>"
+            + "<div class=\"column\" index=\"1\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\">"
+            + "<p>右栏</p></div>"
+            + "</div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 不再依赖 flex 与 class：重建为 2:1 宽度的表格布局
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("columns");
+        // 重建的布局表格带标记类（供 Console 预览补样式）与固定布局样式
+        assertThat(result).contains("class=\"wechat-layout-table\"");
+        assertThat(result).contains("style=\"width:100%;border-collapse:collapse;table-layout:fixed;\"");
+        assertThat(result).contains("width:66.67%");
+        assertThat(result).contains("width:33.33%");
+        // 列间距（编辑器默认 gap: 1em）折算为第二列的左内边距
+        assertThat(result).contains("padding-left:16px");
+        assertThat(result).contains("左栏");
+        assertThat(result).contains("右栏");
+    }
+
+    @Test
+    void columnsWithEqualFlexAreSplitEvenly() {
+        // 三列默认 flex: 1 1 均分，每列约 33.33%
+        String html = "<div class=\"columns\" cols=\"3\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>一</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>二</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>三</p></div>"
+            + "</div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 列宽 33.33% 同时出现在 colgroup 的 <col> 与单元格样式里，这里只数 <col> 的声明
+        int cols = result.split("<col style=\"width:33.33%;\">", -1).length - 1;
+        assertThat(cols).isEqualTo(3);
+        assertThat(result).doesNotContain("display: flex");
+    }
+
+    @Test
+    void multipleColumnsBlocksBecomeSeparateTables() {
+        // 一篇文章里可以有多个分栏卡片；每个卡片各生成一个独立表格（1 个卡片 = 1 个表格，
+        // 2 个卡片 = 2 个表格），不能把相邻卡片合并成「一个表格多行」
+        String card = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>左</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>右</p></div>"
+            + "</div>";
+        String result = WechatContentBeautifier.beautify(card + card, null);
+
+        // 两张卡片各对应一个表格，且每个表格只有一行
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(2);
+        int rows = result.split("<tr>", -1).length - 1;
+        assertThat(rows).isEqualTo(2);
+    }
+
+    @Test
+    void galleryIsRebuiltAsTableLayout() {
+        // Halo 画廊用 grid 分行、flex 排图（微信会过滤 grid），应重建为「一个整体表格、所有列等宽」——
+        // 用户确认的期望版式：整张画廊（含多行图片）只对应一个表格，不按行拆分、不按各图宽高比分宽
+        String html = "<div data-type=\"gallery\" data-group-size=\"2\" data-layout=\"auto\" data-gap=\"8\">"
+            + "<div style=\"display: grid; gap: 8px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1.5 1 0%;\" data-aspect-ratio=\"1.5\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 0.5 1 0%;\" data-aspect-ratio=\"0.5\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/b.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/c.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "</div></div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 不再依赖 grid/flex 与 group 包装层
+        assertThat(result).doesNotContain("display: grid");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("gallery-group");
+        // 两行图片重建为同一个整体表格，带标记类（供 Console 预览补样式）
+        assertThat(result).contains("class=\"wechat-layout-table\"");
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(1);
+        // 所有列等宽（不按宽高比 1.5:0.5 分宽）：两图行各占 50%，单图末行用 colspan 铺满整行
+        assertThat(result).doesNotContain("width:75%");
+        assertThat(result).contains("width:50%");
+        int cols = result.split("<col style=\"width:50%;\">", -1).length - 1;
+        assertThat(cols).isEqualTo(2);
+        assertThat(result).contains("colspan=\"2\"");
+        assertThat(result).contains("width:100%");
+        // 行间距与列间距（data-gap=8）折算为单元格内边距：非首行 padding-top、行内非首列 padding-left
+        assertThat(result).contains("padding-top:8px");
+        assertThat(result).contains("padding-left:8px");
+        // 图片高度改由宽度决定，原 height:100% 被覆写；三张图片全部保留
+        assertThat(result).contains("height:auto");
+        int images = result.split("<img ", -1).length - 1;
+        assertThat(images).isEqualTo(3);
+    }
+
+    @Test
+    void galleryRowsSplitEvenlyIntoUniformColumns() {
+        // 末行不满（3 图 + 2 图）时仍是「一个整体表格、所有列等宽」：统一网格取 6 列
+        // （各行图片数 3 与 2 的最小公倍数），3 图行每图跨 2 列（各 33.33%）、2 图行每图跨 3 列（各 50%），
+        // 都恰好铺满整行；data-gap=0 时不注入任何行/列内边距
+        String html = "<div data-type=\"gallery\" data-group-size=\"3\" data-layout=\"square\" data-gap=\"0\">"
+            + "<div style=\"display: grid; gap: 0px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 0px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\"><img data-type=\"gallery-image\" src=\"https://x/1.png\" style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\"><img data-type=\"gallery-image\" src=\"https://x/2.png\" style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\"><img data-type=\"gallery-image\" src=\"https://x/3.png\" style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 0px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\"><img data-type=\"gallery-image\" src=\"https://x/4.png\" style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\"><img data-type=\"gallery-image\" src=\"https://x/5.png\" style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "</div></div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 整张画廊仍是一个表格，6 条 colgroup 声明 16.67% 等宽列
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(1);
+        int cols = result.split("<col style=\"width:16.67%;\">", -1).length - 1;
+        assertThat(cols).isEqualTo(6);
+        // 3 图行每图跨 2 列、2 图行每图跨 3 列（都铺满整行）
+        int span2 = result.split("colspan=\"2\"", -1).length - 1;
+        assertThat(span2).isEqualTo(3);
+        int span3 = result.split("colspan=\"3\"", -1).length - 1;
+        assertThat(span3).isEqualTo(2);
+        assertThat(result).contains("width:33.33%");
+        assertThat(result).contains("width:50%");
+        // gap=0：不注入行/列内边距
+        assertThat(result).doesNotContain("padding-left");
+        assertThat(result).doesNotContain("padding-top");
+    }
+
+    @Test
+    void galleryInsideColumnsIsRebuiltToo() {
+        // 交叉场景：一列文字 + 一列画廊，分栏与画廊都应重建为表格，无 flex/grid 残留
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>文字</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\">"
+            + "<div data-type=\"gallery\" data-group-size=\"1\" data-layout=\"auto\" data-gap=\"0\">"
+            + "<div style=\"display: grid; gap: 0px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 0px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div></div></div>"
+            + "</div></div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("display: grid");
+        // 外层分栏与内层画廊各重建为一个布局表格
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(2);
+        assertThat(result).contains("文字");
+        assertThat(result).contains("<img");
+    }
+
+    @Test
+    void stackedLayoutFlattensColumnsToOnePerLine() {
+        // 分栏版式「独占一行」：分栏不重建表格，取消 flex 并排、恢复块级——两栏各占一行
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle(BeautifySetting.LAYOUT_STYLE_STACKED);
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" index=\"0\" style=\"min-width: 0;flex: 2 1;box-sizing: border-box;\">"
+            + "<p>左栏</p></div>"
+            + "<div class=\"column\" index=\"1\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\">"
+            + "<p>右栏</p></div>"
+            + "</div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 不生成布局表格，也不残留任何 flex 布局样式
+        assertThat(result).doesNotContain("<table");
+        assertThat(result).doesNotContain("wechat-layout-table");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("flex: 2 1");
+        // 容器与各列恢复为普通块级，栏内内容完整保留
+        assertThat(result).contains("display:block;");
+        assertThat(result).contains("左栏");
+        assertThat(result).contains("右栏");
+    }
+
+    @Test
+    void stackedLayoutFlattensGalleryToOneImagePerLine() {
+        // 画廊版式「独占一行」：画廊不重建表格，网格/分组/图片项全部恢复为块级——每张图片各占一行；
+        // 图片与描述（figcaption）内容完整保留，相邻图片间距按 data-gap 折算为 margin-bottom
+        BeautifySetting setting = new BeautifySetting();
+        setting.setGalleryLayoutStyle("stacked");
+        String html = "<div data-type=\"gallery\" data-group-size=\"2\" data-layout=\"auto\" data-gap=\"8\">"
+            + "<div style=\"display: grid; gap: 8px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\">"
+            + "<figcaption>第一张的描述</figcaption></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/b.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 8px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/c.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div>"
+            + "</div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 不生成布局表格，grid/flex 布局样式全部清除
+        assertThat(result).doesNotContain("<table");
+        assertThat(result).doesNotContain("display: grid");
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("flex-direction");
+        // 三张图片与描述内容保留；描述沿用图片描述样式（居中灰色斜体）
+        int images = result.split("<img ", -1).length - 1;
+        assertThat(images).isEqualTo(3);
+        assertThat(result).contains("第一张的描述");
+        assertThat(result).contains("font-style:italic");
+        // 图片改回自动高度（原 height:100% 仅适合 flex 撑高），相邻图片保留原间距
+        assertThat(result).contains("height:auto");
+        assertThat(result).contains("margin-bottom:8px");
+    }
+
+    @Test
+    void invalidLayoutStyleFallsBackToTableLayout() {
+        // 两项版式取值非法（历史残留、手工改错等）时均按默认「表格」处理，保证同步流程不中断
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle("masonry");
+        setting.setGalleryLayoutStyle("masonry");
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>左</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>右</p></div>"
+            + "</div>"
+            + "<div data-type=\"gallery\" data-group-size=\"1\" data-layout=\"auto\" data-gap=\"0\">"
+            + "<div style=\"display: grid; gap: 0px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 0px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div></div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 分栏与画廊都按「表格」重建（各一个布局表格），无 grid/flex 残留
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(2);
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).doesNotContain("display: grid");
+    }
+
+    @Test
+    void columnsAndGalleryLayoutStylesAreIndependent() {
+        // 两项配置相互独立：分栏「独占一行」时画廊仍保持默认「表格」，只影响各自区块
+        BeautifySetting setting = new BeautifySetting();
+        setting.setColumnsLayoutStyle(BeautifySetting.LAYOUT_STYLE_STACKED);
+        String html = "<div class=\"columns\" cols=\"2\" style=\"display: flex;width: 100%;gap: 1em;\">"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>左栏</p></div>"
+            + "<div class=\"column\" style=\"min-width: 0;flex: 1 1;box-sizing: border-box;\"><p>右栏</p></div>"
+            + "</div>"
+            + "<div data-type=\"gallery\" data-group-size=\"2\" data-layout=\"auto\" data-gap=\"4\">"
+            + "<div style=\"display: grid; gap: 4px;\">"
+            + "<div data-type=\"gallery-group\" style=\"display: flex; flex-direction: row; gap: 4px;\">"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/a.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "<div style=\"flex: 1 1 0%;\" data-aspect-ratio=\"1\">"
+            + "<img data-type=\"gallery-image\" src=\"https://x/b.png\" "
+            + "style=\"width: 100%; height: 100%; margin: 0; object-fit: cover;\"></div>"
+            + "</div></div></div>";
+        String result = WechatContentBeautifier.beautify(html, setting);
+
+        // 分栏保持块级堆叠（未重建表格），画廊仍重建为一张布局表格；内容与图片全部保留
+        assertThat(result).contains("display:block;");
+        int tables = result.split("<table ", -1).length - 1;
+        assertThat(tables).isEqualTo(1);
+        assertThat(result).doesNotContain("display: flex");
+        assertThat(result).contains("左栏");
+        assertThat(result).contains("右栏");
+        int images = result.split("<img ", -1).length - 1;
+        assertThat(images).isEqualTo(2);
     }
 }
