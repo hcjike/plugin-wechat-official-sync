@@ -74,6 +74,15 @@ final class WechatContentBeautifier {
     /** 未配置或非法时使用的内置默认引用块背景色（浅灰）。 */
     private static final String DEFAULT_BLOCKQUOTE_BG_COLOR = "#f7f7f7";
 
+    /** 未配置或非法时使用的内置默认折叠块标题栏背景色（浅灰）。 */
+    private static final String DEFAULT_DETAILS_TITLE_BG_COLOR = "#f7f7f7";
+
+    /** 未配置或非法时使用的内置默认折叠块内容区背景色（白色，与正文背景一致）。 */
+    private static final String DEFAULT_DETAILS_CONTENT_BG_COLOR = "#ffffff";
+
+    /** 未配置或非法时使用的内置默认折叠块边框颜色（浅灰，与表格边框同色）。 */
+    private static final String DEFAULT_DETAILS_BORDER_COLOR = "#e6e6e6";
+
     /** H1–H6 未配置或非法时的内置默认文字颜色（下标 0 对应 H1）。 */
     private static final String[] DEFAULT_HEADING_COLORS =
         {"#222222", "#222222", "#222222", "#222222", "#333333", "#888888"};
@@ -149,6 +158,9 @@ final class WechatContentBeautifier {
     private static final String FIGCAPTION_STYLE =
         "text-align:center;font-size:13px;color:#999999;font-style:italic;margin-top:6px;";
 
+    /** 折叠块标题栏前缀标记（呼应 Halo 编辑器折叠块的展开箭头）。 */
+    private static final String DETAILS_MARKER = "▸";
+
     /**
      * 布局表格样式（分栏卡片/画廊重建用）：铺满屏宽、固定布局按单元格百分比宽度分配列宽、
      * 不带正文表格的边框与内边距。布局表格在通用样式注入<b>之后</b>重建，不受 {@link #TABLE_STYLE} 影响。
@@ -212,7 +224,7 @@ final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     static String beautify(String html, BeautifySetting config) {
@@ -234,8 +246,9 @@ final class WechatContentBeautifier {
         // 转换 Halo 插件注入的自定义 Web Component（链接卡片/下载链接等），微信无法渲染，
         // 需在样式注入前转为标准 <a>/<p>；转换后遗留的空段落交由 removeEmptyParagraphs 清理
         convertPluginCustomElements(body);
-        // 把 <figure>/<summary>/<details> 等微信不识别的块级包装降级为标准 <p>，
-        // 否则微信编辑器会在这些块前后插入空 <p> 占位（发布后表现为图片/折叠块上下多出空行）
+        // 把 <figure>、游离的 <summary> 等微信不识别的块级包装降级为标准 <p>，
+        // 否则微信编辑器会在这些块前后插入空 <p> 占位（发布后表现为图片上下多出空行）；
+        // 折叠块（<details>）整体保留，由流程末尾的 buildDetailsBlocks 统一重建
         normalizeBlockWrappers(body);
         // 删除 TipTap/ProseMirror 在表格等块前后遗留的空段落（否则微信里渲染成多余空行）
         removeEmptyParagraphs(body);
@@ -249,6 +262,10 @@ final class WechatContentBeautifier {
         // 分栏卡片与画廊按各自配置重建版式（表格/独占一行）：微信会过滤 display:grid、flex 支持不稳定，
         // 直接同步会导致各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
         rebuildBlockLayouts(body, cfg);
+        // 折叠块（Halo <details>）重建为静态展开的卡片，须在全部样式注入与版式重建之后：
+        // 新生成的标题栏 <p> 不参与通用段落样式注入，内容区沿用内容块自身已注入的样式；
+        // 标题栏/内容区背景色与边框颜色取自配置（非法值回退内置默认）
+        buildDetailsBlocks(body, cfg);
         return body.html();
     }
 
@@ -442,24 +459,153 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 把微信编辑器不友好的块级包装标签降级为标准 {@code <p>}：Halo 用 {@code <figure>} 包图片、
-     * {@code <details>}/{@code <summary>} 做折叠块，微信编辑器不认识这些块，会在其前后插入空的
-     * {@code <p>} 占位（发布后表现为图片/折叠块上下多出空行）。故在样式注入前统一降级为微信
-     * 原生支持的 {@code <p>} 块，从根源上避免编辑器插入占位空行。
+     * 把微信编辑器不友好的块级包装标签降级为标准 {@code <p>}：Halo 用 {@code <figure>} 包图片，
+     * 微信编辑器不认识这些块，会在其前后插入空的 {@code <p>} 占位（发布后表现为图片上下多出空行）。
+     * 故在样式注入前降级为微信原生支持的 {@code <p>} 块，从根源上避免编辑器插入占位空行。
+     *
+     * <p>折叠块（{@code <details>}）不在此处处理：整块由 {@link #buildDetailsBlocks} 在流程末尾
+     * 重建为「卡片 + 标题栏」，其中 {@code <summary>} 保留至该步；仅游离的 {@code <summary>}
+     * （无 {@code <details>} 父，属来源异常的遗留标记）在此降级为 {@code <p>}。</p>
      */
     private static void normalizeBlockWrappers(Element body) {
-        // <details> 解包（保留内部 summary 与内容），随后 summary 会被转为 <p>
-        for (Element details : body.select("details")) {
-            details.unwrap();
+        // <figure>（图片块）→ 标准 <p>，丢弃其 Halo 布局内联样式（如 display:flex）
+        for (Element figure : body.select("figure")) {
+            wrapChildrenIntoParagraph(figure);
         }
-        // <figure>（图片块）与 <summary>（折叠标题）→ 标准 <p>，丢弃其 Halo 布局内联样式（如 display:flex）
-        for (Element element : body.select("figure, summary")) {
-            Element paragraph = new Element(Tag.valueOf("p"), "");
-            for (Node child : new ArrayList<>(element.childNodes())) {
-                paragraph.appendChild(child);
+        // 游离的 <summary>（无 <details> 父）→ 标准 <p>
+        for (Element summary : body.select("summary")) {
+            if (!isInside(summary, "details")) {
+                wrapChildrenIntoParagraph(summary);
             }
-            element.replaceWith(paragraph);
         }
+    }
+
+    /** 用标准 {@code <p>} 替换元素，子节点按原顺序原样保留（figure/summary 降级共用）。 */
+    private static void wrapChildrenIntoParagraph(Element element) {
+        Element paragraph = new Element(Tag.valueOf("p"), "");
+        for (Node child : new ArrayList<>(element.childNodes())) {
+            paragraph.appendChild(child);
+        }
+        element.replaceWith(paragraph);
+    }
+
+    /**
+     * 重建 Halo 编辑器的「折叠内容」（{@code <details>}；编辑器输出形如
+     * {@code <details class="details" open><summary>标题</summary><div data-type="detailsContent">…</div></details>}）
+     * 为<b>静态展开的卡片</b>（样式见 {@link #detailsCardStyle}）：标题栏加粗、带
+     * {@link #DETAILS_MARKER} 标记，以细分割线与内容区隔开，内容照常排版（等价于「展开」状态）；
+     * 标题栏背景色、内容区背景色与边框颜色分别取配置 {@code detailsTitleBgColor}/
+     * {@code detailsContentBgColor}/{@code detailsBorderColor}（非法值回退内置默认）。
+     *
+     * <p>微信图文无法保留折叠交互：微信编辑器不识别 {@code <details>}/{@code <summary>}，会丢弃这些
+     * 标签并在块前后插入空 {@code <p>} 占位。故整块重建为微信能稳定渲染的 {@code <section>} 结构，
+     * 不引入任何 class/脚本依赖。</p>
+     *
+     * <p>须在全部样式注入与版式重建（分栏/画廊）之后执行：新生成的标题栏 {@code <p>} 不参与通用
+     * 段落样式注入，内容区搬运的内容块沿用自身已注入的样式。折叠块可嵌套，倒序遍历快照——先重建
+     * 内层，外层搬运的子树中已是重建后的卡片。无可见标题（{@code <summary>} 缺失或为空白）的折叠块
+     * 失去折叠语义，解包保留内容。</p>
+     */
+    private static void buildDetailsBlocks(Element body, BeautifySetting cfg) {
+        // 三项颜色各自解析一次（合法十六进制，非法回退内置默认），本页所有折叠块共用同一组样式
+        String borderColor = color(cfg.getDetailsBorderColor(), DEFAULT_DETAILS_BORDER_COLOR);
+        String cardStyle = detailsCardStyle(borderColor);
+        String titleStyle = detailsSummaryStyle(
+            color(cfg.getDetailsTitleBgColor(), DEFAULT_DETAILS_TITLE_BG_COLOR), borderColor);
+        String contentStyle = detailsContentStyle(
+            color(cfg.getDetailsContentBgColor(), DEFAULT_DETAILS_CONTENT_BG_COLOR));
+        List<Element> detailsBlocks = body.select("details");
+        for (int i = detailsBlocks.size() - 1; i >= 0; i--) {
+            Element details = detailsBlocks.get(i);
+            // 可能已随外层折叠块重建被替换/搬运后脱离文档，跳过失效节点
+            if (details.parent() == null) {
+                continue;
+            }
+            convertDetails(details, cardStyle, titleStyle, contentStyle);
+        }
+    }
+
+    /** 把单个 {@code <details>} 重建为「卡片 + 标题栏 + 内容区」；无可见标题时解包保留内容。 */
+    private static void convertDetails(Element details, String cardStyle, String titleStyle, String contentStyle) {
+        Element summary = directSummary(details);
+        if (summary == null || hasNoVisibleText(summary.text())) {
+            // 无可见标题的折叠块失去折叠语义：清掉空 summary 与内容包装层，解包保留内容
+            if (summary != null) {
+                summary.remove();
+            }
+            for (Element child : new ArrayList<>(details.children())) {
+                if (isDetailsContentBox(child)) {
+                    child.unwrap();
+                }
+            }
+            details.unwrap();
+            return;
+        }
+        Element card = new Element(Tag.valueOf("section"), "");
+        card.attr("style", cardStyle);
+        card.appendChild(buildDetailsTitle(summary, titleStyle));
+        appendDetailsContent(card, details, contentStyle);
+        details.replaceWith(card);
+    }
+
+    /** 折叠块标题栏：{@code ▸} 标记 + 原 summary 的子节点（保留其行内样式），整体用标题栏样式呈现。 */
+    private static Element buildDetailsTitle(Element summary, String titleStyle) {
+        Element title = new Element(Tag.valueOf("p"), "");
+        title.attr("style", titleStyle);
+        title.appendChild(new TextNode(DETAILS_MARKER + " "));
+        for (Node child : new ArrayList<>(summary.childNodes())) {
+            title.appendChild(child);
+        }
+        return title;
+    }
+
+    /**
+     * 把折叠块内容搬入内容区 {@code <section>}：优先取 {@code <div data-type="detailsContent">}
+     * （编辑器输出的标准内容包装层），缺失时兜底取 {@code <summary>} 之外的全部直接子节点；
+     * 内容为空时不生成内容区（仅保留标题栏卡片，避免卡片底部多出一段空白）。
+     */
+    private static void appendDetailsContent(Element card, Element details, String contentStyle) {
+        Element contentBox = null;
+        for (Element child : details.children()) {
+            if (isDetailsContentBox(child)) {
+                contentBox = child;
+                break;
+            }
+        }
+        if (contentBox == null) {
+            contentBox = new Element(Tag.valueOf("div"), "");
+            for (Element child : new ArrayList<>(details.children())) {
+                if ("summary".equalsIgnoreCase(child.tagName())) {
+                    continue;
+                }
+                contentBox.appendChild(child);
+            }
+        }
+        if (contentBox.children().isEmpty() && hasNoVisibleText(contentBox.text())) {
+            return;
+        }
+        Element contentSection = new Element(Tag.valueOf("section"), "");
+        contentSection.attr("style", contentStyle);
+        for (Node node : new ArrayList<>(contentBox.childNodes())) {
+            contentSection.appendChild(node);
+        }
+        card.appendChild(contentSection);
+    }
+
+    /** 取 {@code <details>} 的直接子 {@code <summary>}（编辑器输出的标准位置）；无则返回 {@code null}。 */
+    private static Element directSummary(Element details) {
+        for (Element child : details.children()) {
+            if ("summary".equalsIgnoreCase(child.tagName())) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /** 是否为折叠块内容包装层（编辑器输出 {@code <div data-type="detailsContent">}）。 */
+    private static boolean isDetailsContentBox(Element element) {
+        return "div".equalsIgnoreCase(element.tagName())
+            && "detailsContent".equalsIgnoreCase(element.attr("data-type"));
     }
 
     /**
@@ -1106,6 +1252,31 @@ final class WechatContentBeautifier {
             + (borderEnabled ? "border-left:4px solid " + accent + ";" : "")
             + "background:" + bgColor + ";color:#666666;border-radius:"
             + (borderEnabled ? "0 4px 4px 0" : "4px") + ";";
+    }
+
+    /**
+     * 折叠块卡片样式：细边框（颜色可配）、圆角；{@code overflow:hidden} 让标题栏底色不溢出圆角。
+     */
+    private static String detailsCardStyle(String borderColor) {
+        return "margin:1em 0;border:1px solid " + borderColor + ";border-radius:6px;overflow:hidden;";
+    }
+
+    /**
+     * 折叠块标题栏样式：底色可配 + 底部细分割线（与卡片边框同色）、加粗；标题文字前带
+     * {@link #DETAILS_MARKER} 标记。文字保持深色，配浅色底观感最协调。
+     */
+    private static String detailsSummaryStyle(String titleBgColor, String borderColor) {
+        return "margin:0;padding:10px 14px;background:" + titleBgColor
+            + ";border-bottom:1px solid " + borderColor
+            + ";font-weight:bold;font-size:15px;line-height:1.6;color:#333333;";
+    }
+
+    /**
+     * 折叠块内容区样式：底色可配，左右内边距与标题栏对齐；内容块沿用各自已注入的样式
+     * （段落自带上下外边距）。
+     */
+    private static String detailsContentStyle(String contentBgColor) {
+        return "padding:2px 14px;background:" + contentBgColor + ";";
     }
 
     /** 正文根节点基础排版：字体、字号、行高与可配置正文色，供未显式覆盖的后代继承。 */
