@@ -80,6 +80,15 @@ public class BeautifySetting {
     /** 六级标题左侧强调边框颜色（需开启 {@link #headingBorderEnabled}）。默认微信绿。 */
     private String h6BorderColor = "#07c160";
 
+    /** 折叠块（Halo 折叠内容）标题栏的背景颜色。默认浅灰。 */
+    private String detailsTitleBgColor = "#f7f7f7";
+
+    /** 折叠块内容区的背景颜色。默认白色（与正文背景一致）。 */
+    private String detailsContentBgColor = "#ffffff";
+
+    /** 折叠块卡片边框（含标题栏分隔线）的颜色。默认浅灰。 */
+    private String detailsBorderColor = "#e6e6e6";
+
     /**
      * 分栏卡片的同步版式：{@link #LAYOUT_STYLE_TABLE}（默认，重建为表格、各列并排）或
      * {@link #LAYOUT_STYLE_STACKED}（独占一行——每栏一行，栏内内容照常保留）。取值非法时按表格处理。

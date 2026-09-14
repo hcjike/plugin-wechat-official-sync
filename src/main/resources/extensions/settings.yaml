@@ -169,6 +169,24 @@ spec:
           help: H6 标题左侧强调边框的颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
+        - $formkit: color
+          name: detailsTitleBgColor
+          label: 折叠块标题背景色
+          help: 折叠块（Halo 折叠内容）标题栏的背景颜色，标题文字保持深色
+          value: "#f7f7f7"
+          validation: required
+        - $formkit: color
+          name: detailsContentBgColor
+          label: 折叠块内容背景色
+          help: 折叠块内容区的背景颜色
+          value: "#ffffff"
+          validation: required
+        - $formkit: color
+          name: detailsBorderColor
+          label: 折叠块边框颜色
+          help: 折叠块卡片的边框与标题栏分隔线颜色
+          value: "#e6e6e6"
+          validation: required
         - $formkit: select
           name: columnsLayoutStyle
           id: columnsLayoutStyle

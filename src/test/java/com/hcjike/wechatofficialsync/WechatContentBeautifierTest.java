@@ -648,6 +648,137 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void detailsIsRebuiltAsExpandedCardWithTitleBar() {
+        // Halo 编辑器「折叠内容」渲染为 <details class="details">，微信不支持折叠交互且会丢标签，
+        // 应整块重建为静态展开的卡片：浅灰底加粗标题栏（▸ 标记 + 分割线）+ 内容区
+        String html = "<details class=\"details\">"
+            + "<summary>百度云盘下载，约34.14GB</summary>"
+            + "<div data-type=\"detailsContent\"><p>下载内容包括安装包与说明文档。</p></div>"
+            + "</details>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 折叠标签与内容包装层全部清除（未展开的块同样静态展开呈现）
+        assertThat(result).doesNotContain("<details");
+        assertThat(result).doesNotContain("<summary");
+        assertThat(result).doesNotContain("detailsContent");
+        // 卡片：浅灰细边框 + 圆角
+        assertThat(result).contains("border:1px solid #e6e6e6;border-radius:6px;overflow:hidden;");
+        // 标题栏：▸ 标记 + 标题文字，浅灰底、加粗、底部细分隔线
+        assertThat(result).contains(">▸ 百度云盘下载，约34.14GB</p>");
+        assertThat(result).contains("background:#f7f7f7;border-bottom:1px solid #e6e6e6;");
+        assertThat(result).contains("font-weight:bold");
+        // 内容区照常排版（沿用正文段落样式）
+        assertThat(result).contains("padding:2px 14px;");
+        assertThat(result).contains("下载内容包括安装包与说明文档。");
+        assertThat(result).contains("margin:0.9em 0");
+    }
+
+    @Test
+    void detailsContentKeepsRichBlocksInsideCard() {
+        // 折叠内容里的代码块/图片照常参与重建与样式注入，整体位于卡片内容区内
+        String html = "<details class=\"details\" open><summary><span leaf=\"\">接口示例</span></summary>"
+            + "<div data-type=\"detailsContent\">"
+            + "<p>请求示例如下：</p>"
+            + "<pre><code class=\"language-java\">int a = 1;</code></pre>"
+            + "<img src=\"https://x/a.png\">"
+            + "</div></details>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<details");
+        // 标题仍带 ▸ 标记（summary 的行内子节点原样保留）
+        assertThat(result).contains("▸ <span leaf=\"\">接口示例</span>");
+        // 代码块重建为微信原生结构、图片自适应，均在卡片内
+        assertThat(result).contains("<pre class=\"code-snippet__js\" data-lang=\"java\">");
+        assertThat(result).contains("max-width:100%");
+        assertThat(result).contains("请求示例如下：");
+    }
+
+    @Test
+    void nestedDetailsAreRebuiltInsideOut() {
+        // 折叠块可嵌套：内层先重建为卡片，外层内容区中承载的是内层卡片，两层标题栏都在
+        String html = "<details class=\"details\" open><summary>外层</summary>"
+            + "<div data-type=\"detailsContent\">"
+            + "<p>外层正文</p>"
+            + "<details class=\"details\" open><summary>内层</summary>"
+            + "<div data-type=\"detailsContent\"><p>内层正文</p></div></details>"
+            + "</div></details>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<details");
+        assertThat(result).doesNotContain("<summary");
+        // 两层标题栏各带一个 ▸ 标记
+        int markers = result.split("▸ ", -1).length - 1;
+        assertThat(markers).isEqualTo(2);
+        assertThat(result).contains("外层正文");
+        assertThat(result).contains("内层正文");
+    }
+
+    @Test
+    void detailsWithoutVisibleSummaryIsUnwrapped() {
+        // 无可见标题（summary 缺失或为空白）的折叠块失去折叠语义：解包保留内容，不生成卡片
+        String html = "<details class=\"details\"><summary></summary>"
+            + "<div data-type=\"detailsContent\"><p>仅内容</p></div></details>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<details");
+        assertThat(result).doesNotContain("<summary");
+        assertThat(result).doesNotContain("detailsContent");
+        assertThat(result).doesNotContain("▸");
+        assertThat(result).doesNotContain("border-radius:6px");
+        assertThat(result).contains("仅内容");
+    }
+
+    @Test
+    void detailsWithEmptyContentKeepsTitleBarOnly() {
+        // 折叠块内容为空（内容被清空/只剩占位空段落）时仅呈现标题栏卡片，不生成内容区
+        String html = "<details class=\"details\" open><summary>提示</summary>"
+            + "<div data-type=\"detailsContent\">"
+            + "<p><span leaf=\"\"><br class=\"ProseMirror-trailingBreak\"></span></p>"
+            + "</div></details>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("▸ 提示</p>");
+        assertThat(result).doesNotContain("padding:2px 14px;");
+    }
+
+    @Test
+    void detailsColorsAreConfigurable() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setDetailsTitleBgColor("#eef5ff");
+        cfg.setDetailsContentBgColor("#fbfdff");
+        cfg.setDetailsBorderColor("#cce0ff");
+        String html = "<details class=\"details\" open><summary>折叠标题</summary>"
+            + "<div data-type=\"detailsContent\"><p>折叠内容</p></div></details>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        // 标题栏背景色与内容区背景色、边框颜色均可配（默认值被完整覆盖）
+        assertThat(result).contains("border:1px solid #cce0ff;border-radius:6px;overflow:hidden;");
+        assertThat(result).contains("background:#eef5ff;border-bottom:1px solid #cce0ff;");
+        assertThat(result).contains("padding:2px 14px;background:#fbfdff;");
+        assertThat(result).contains(">▸ 折叠标题</p>");
+        assertThat(result).doesNotContain("#f7f7f7");
+        assertThat(result).doesNotContain("#e6e6e6");
+    }
+
+    @Test
+    void invalidDetailsColorsFallBackToDefaults() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setDetailsTitleBgColor("oops");
+        cfg.setDetailsContentBgColor("red");
+        cfg.setDetailsBorderColor("#12");
+        String html = "<details class=\"details\" open><summary>折叠标题</summary>"
+            + "<div data-type=\"detailsContent\"><p>折叠内容</p></div></details>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        // 非法色值分别回退到内置默认（浅灰标题栏/白色内容区/浅灰边框），不污染 style
+        assertThat(result).contains("border:1px solid #e6e6e6;border-radius:6px;overflow:hidden;");
+        assertThat(result).contains("background:#f7f7f7;border-bottom:1px solid #e6e6e6;");
+        assertThat(result).contains("padding:2px 14px;background:#ffffff;");
+        assertThat(result).doesNotContain("oops");
+        assertThat(result).doesNotContain("background:red;");
+    }
+
+    @Test
     void downloadLinksWithoutValidDataIsRemovedWithItsEmptyParagraph() {
         // data-links 解析不出有效地址时移除该组件，其外层空 <p> 也一并被清理，不残留空行
         String html = "<p>上文</p>"
