@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.content;
 
+import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import org.junit.jupiter.api.Test;

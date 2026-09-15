@@ -1,4 +1,4 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.ssrf;
 
 import io.netty.resolver.AddressResolver;
 import io.netty.resolver.AddressResolverGroup;
@@ -31,11 +31,11 @@ import java.util.function.Supplier;
  * @author hcjike
  * @since 1.0.0
  */
-final class SsrfSafeAddressResolverGroup extends AddressResolverGroup<InetSocketAddress> {
+public final class SsrfSafeAddressResolverGroup extends AddressResolverGroup<InetSocketAddress> {
 
     private final Supplier<SsrfPolicy> policySupplier;
 
-    SsrfSafeAddressResolverGroup(Supplier<SsrfPolicy> policySupplier) {
+    public SsrfSafeAddressResolverGroup(Supplier<SsrfPolicy> policySupplier) {
         this.policySupplier = policySupplier;
     }
 

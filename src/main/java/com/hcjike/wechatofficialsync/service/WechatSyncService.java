@@ -1,5 +1,12 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.service;
 
+import com.hcjike.wechatofficialsync.client.WechatApiException;
+import com.hcjike.wechatofficialsync.client.WechatMpClient;
+import com.hcjike.wechatofficialsync.config.BeautifySetting;
+import com.hcjike.wechatofficialsync.config.WechatSetting;
+import com.hcjike.wechatofficialsync.content.WechatContentBeautifier;
+import com.hcjike.wechatofficialsync.model.SyncRequest;
+import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;

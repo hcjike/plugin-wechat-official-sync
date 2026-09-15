@@ -1,5 +1,6 @@
 package com.hcjike.wechatofficialsync;
 
+import com.hcjike.wechatofficialsync.service.WechatSyncRecordStore;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 

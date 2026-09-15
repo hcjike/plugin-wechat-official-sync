@@ -1,4 +1,4 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.config;
 
 import lombok.Data;
 

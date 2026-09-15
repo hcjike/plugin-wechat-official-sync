@@ -1,4 +1,4 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.client;
 
 /**
  * 调用微信公众号接口失败时抛出。

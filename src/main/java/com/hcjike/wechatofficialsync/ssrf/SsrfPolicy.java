@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.ssrf;
 
+import com.hcjike.wechatofficialsync.client.WechatMpClient;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.util.ArrayList;
@@ -31,10 +32,10 @@ import java.util.Set;
  * @author hcjike
  * @since 1.0.0
  */
-final class SsrfPolicy {
+public final class SsrfPolicy {
 
     /** 空白名单：不放行任何受限地址（默认、最安全）。 */
-    static final SsrfPolicy EMPTY = new SsrfPolicy(Set.of(), List.of());
+    public static final SsrfPolicy EMPTY = new SsrfPolicy(Set.of(), List.of());
 
     /** 允许的域名（已小写规范化；以 {@code *.} 开头表示子域通配）。 */
     private final Set<String> allowedHosts;
@@ -53,7 +54,7 @@ final class SsrfPolicy {
      * @param raw 白名单原文，可为空
      * @return 解析后的策略；输入为空时返回 {@link #EMPTY}
      */
-    static SsrfPolicy parse(String raw) {
+    public static SsrfPolicy parse(String raw) {
         if (raw == null || raw.isBlank()) {
             return EMPTY;
         }
