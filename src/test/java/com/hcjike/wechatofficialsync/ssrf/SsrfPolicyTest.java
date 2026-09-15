@@ -1,4 +1,4 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.ssrf;
 
 import static org.assertj.core.api.Assertions.assertThat;
 

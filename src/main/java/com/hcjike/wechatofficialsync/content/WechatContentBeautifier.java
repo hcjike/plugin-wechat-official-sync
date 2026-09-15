@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.content;
 
+import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -33,7 +34,7 @@ import tools.jackson.databind.json.JsonMapper;
  * @author hcjike
  * @since 1.0.0
  */
-final class WechatContentBeautifier {
+public final class WechatContentBeautifier {
 
     private static final Logger log = LoggerFactory.getLogger(WechatContentBeautifier.class);
 
@@ -245,7 +246,7 @@ final class WechatContentBeautifier {
      * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、表格宽度模式、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
-    static String beautify(String html, BeautifySetting config) {
+    public static String beautify(String html, BeautifySetting config) {
         if (html == null || html.isBlank()) {
             return html == null ? "" : html;
         }

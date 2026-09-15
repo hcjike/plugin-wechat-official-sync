@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.ssrf;
 
+import com.hcjike.wechatofficialsync.client.WechatApiException;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 

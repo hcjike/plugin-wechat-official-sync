@@ -1,5 +1,8 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.service;
 
+import com.hcjike.wechatofficialsync.config.BeautifySetting;
+import com.hcjike.wechatofficialsync.config.WechatSetting;
+import com.hcjike.wechatofficialsync.model.SyncRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;

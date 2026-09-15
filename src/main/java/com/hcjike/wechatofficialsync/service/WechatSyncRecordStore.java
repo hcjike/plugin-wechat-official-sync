@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.service;
 
+import com.hcjike.wechatofficialsync.model.SyncRecord;
 import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;

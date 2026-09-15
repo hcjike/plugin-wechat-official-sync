@@ -1,5 +1,11 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.endpoint;
 
+import com.hcjike.wechatofficialsync.config.BeautifySetting;
+import com.hcjike.wechatofficialsync.config.WechatSetting;
+import com.hcjike.wechatofficialsync.model.SyncRecord;
+import com.hcjike.wechatofficialsync.model.SyncRequest;
+import com.hcjike.wechatofficialsync.service.WechatSyncRecordStore;
+import com.hcjike.wechatofficialsync.service.WechatSyncService;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;

@@ -1,5 +1,6 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.ssrf;
 
+import com.hcjike.wechatofficialsync.client.WechatApiException;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -26,7 +27,7 @@ import java.util.Locale;
  * @author hcjike
  * @since 1.0.0
  */
-final class SsrfGuard {
+public final class SsrfGuard {
 
     private SsrfGuard() {
     }
@@ -82,7 +83,7 @@ final class SsrfGuard {
      * @return 校验通过的 {@link URI}
      * @throws WechatApiException 结构非法、主机无法解析或命中受限网段且不在白名单时抛出
      */
-    static URI validateAndResolve(String url, SsrfPolicy policy) {
+    public static URI validateAndResolve(String url, SsrfPolicy policy) {
         SsrfPolicy effective = policy == null ? SsrfPolicy.EMPTY : policy;
         URI uri = validateUrl(url);
         String host = uri.getHost();
@@ -203,7 +204,7 @@ final class SsrfGuard {
     /**
      * 由 URI 推导展示用的 host[:port]，仅用于日志与错误信息，不含任何凭据。
      */
-    static String describe(URI uri) {
+    public static String describe(URI uri) {
         if (uri == null) {
             return "";
         }

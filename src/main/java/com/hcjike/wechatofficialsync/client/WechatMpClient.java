@@ -1,5 +1,9 @@
-package com.hcjike.wechatofficialsync;
+package com.hcjike.wechatofficialsync.client;
 
+import com.hcjike.wechatofficialsync.service.WechatSyncService;
+import com.hcjike.wechatofficialsync.ssrf.SsrfGuard;
+import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
+import com.hcjike.wechatofficialsync.ssrf.SsrfSafeAddressResolverGroup;
 import com.twelvemonkeys.imageio.plugins.webp.WebPImageReaderSpi;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
