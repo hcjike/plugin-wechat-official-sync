@@ -210,7 +210,7 @@ class WechatContentBeautifierTest {
         assertThat(result).doesNotContain("display:block;");
         // 单元格内容允许自动换行，不再强制 white-space:nowrap
         assertThat(result).doesNotContain("white-space:nowrap");
-        // 固定布局：列宽按文章 <colgroup> 设定比例渲染，列宽之和超屏时整体溢出→横向滚动
+        // 固定布局：列宽按首行单元格宽度渲染（colgroup 宽度已转写过去），列宽之和超屏时整体溢出→横向滚动
         assertThat(result).contains("table-layout:fixed");
         // 长 token 在列内折断、不遮挡相邻列（不用 anywhere 避免塌缩宽度丢失滚动）
         assertThat(result).contains("overflow-wrap:break-word");
@@ -229,7 +229,7 @@ class WechatContentBeautifierTest {
         assertThat(result).contains("width:600px;");
         // 用户设定的宽度出现在默认 width:100% 之后
         assertThat(result.indexOf("width:600px;")).isGreaterThan(result.indexOf("width:100%"));
-        // 默认样式不注入任何 min-width，避免强制撑宽
+        // 无 colgroup 列宽时无从得知原始总宽，不补 min-width、不强制撑宽
         assertThat(result).doesNotContain("min-width");
     }
 
@@ -307,6 +307,151 @@ class WechatContentBeautifierTest {
         // 表格与引用块保留
         assertThat(result).contains("<table");
         assertThat(result).contains("<blockquote");
+    }
+
+    @Test
+    void tableColgroupWidthsAreMovedToFirstRowCells() {
+        // Halo/TipTap 表格的列宽由 <colgroup> 承载，但微信编辑器的表格模型不认识 colgroup：
+        // 草稿在编辑器里二次编辑、重建结构时会被误解析成多余空行/空框。故列宽转写到首行单元格
+        // （固定布局下首行宽度即列宽），colgroup 整体删除
+        String html = "<table><colgroup><col style=\"width: 30%\"><col style=\"width: 70%\"></colgroup>"
+            + "<tbody><tr><th>甲</th><th>乙</th></tr><tr><td>1</td><td>2</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).doesNotContain("<col ");
+        assertThat(result).contains("width:30%;");
+        assertThat(result).contains("width:70%;");
+        // 百分比列宽本身即相对宽度，不补 min-width
+        assertThat(result).doesNotContain("min-width");
+    }
+
+    @Test
+    void tableColgroupWidthsMergeAcrossColspan() {
+        // 首行单元格跨列（colspan>1）时，宽度按覆盖的列合并写入
+        String html = "<table><colgroup>"
+            + "<col style=\"width: 10%\"><col style=\"width: 20%\"><col style=\"width: 70%\"></colgroup>"
+            + "<tbody><tr><th colspan=\"2\">合并表头</th><th>丙</th></tr>"
+            + "<tr><td>1</td><td>2</td><td>3</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).contains("width:30%;");
+        assertThat(result).contains("width:70%;");
+    }
+
+    @Test
+    void tableFillModeNormalizesPixelColWidthsToPercent() {
+        // 「宽度铺满」模式：像素列宽按相对比例归一化为百分比（100/300 → 25%/75%），表格收敛在屏宽内
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setTableWidthMode(BeautifySetting.TABLE_WIDTH_MODE_FILL);
+        String html = "<table><colgroup><col style=\"width: 100px\"><col style=\"width: 300px\"></colgroup>"
+            + "<tbody><tr><td>甲</td><td>乙</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).contains("width:25%;");
+        assertThat(result).contains("width:75%;");
+        // 「宽度铺满」不补 min-width：表格收敛在屏宽内、始终不触发横向滚动
+        assertThat(result).doesNotContain("min-width");
+    }
+
+    @Test
+    void tableProportionalModeKeepsPixelColWidthRatios() {
+        // 默认「保持比例」：像素列宽按相对比例转写为百分比（100/300 → 25%/75%——百分比是微信渲染
+        // 可靠保留的列宽载体，像素列宽会被微信丢弃），表格补 min-width=原始总宽：总宽超出屏宽时
+        // 表格整体溢出，由外层容器横向滚动查看全貌
+        String html = "<table><colgroup><col style=\"width: 100px\"><col style=\"width: 300px\"></colgroup>"
+            + "<tbody><tr><td>甲</td><td>乙</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).contains("width:25%;");
+        assertThat(result).contains("width:75%;");
+        assertThat(result).doesNotContain("width:100px;");
+        assertThat(result).contains("min-width:400px;");
+    }
+
+    @Test
+    void tableProportionalModeMergesPixelColWidthsAcrossColspan() {
+        // 「保持比例」下像素列宽同样按 colspan 合并后归一化（100+150 → 250/300 ≈ 83.33%），
+        // 表格补 min-width=原始总宽（300px）托底
+        String html = "<table><colgroup><col style=\"width: 100px\"><col style=\"width: 150px\">"
+            + "<col style=\"width: 50px\"></colgroup>"
+            + "<tbody><tr><th colspan=\"2\">合并表头</th><th>丙</th></tr>"
+            + "<tr><td>1</td><td>2</td><td>3</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).contains("width:83.33%;");
+        assertThat(result).contains("width:16.67%;");
+        assertThat(result).contains("min-width:300px;");
+    }
+
+    @Test
+    void tableFillModeForcesFullWidthOverArticleWidth() {
+        // 「宽度铺满」模式：表格宽度强制 100%（追加在文章自定义宽度之后、后者胜出），
+        // 保证铺满屏宽、不产生横向滚动
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setTableWidthMode(BeautifySetting.TABLE_WIDTH_MODE_FILL);
+        String html = "<table style=\"width:600px;\"><tr><td>值</td></tr></table>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        assertThat(result).contains("width:600px;");
+        assertThat(result.lastIndexOf("width:100%")).isGreaterThan(result.indexOf("width:600px;"));
+    }
+
+    @Test
+    void invalidTableWidthModeFallsBackToProportional() {
+        // 表格宽度模式取值非法时按默认「保持比例」处理：像素列宽归一化为比例、表格补 min-width 托底
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setTableWidthMode("unexpected");
+        String html = "<table><colgroup><col style=\"width: 100px\"><col style=\"width: 300px\"></colgroup>"
+            + "<tbody><tr><td>甲</td><td>乙</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, cfg);
+
+        assertThat(result).contains("width:25%;");
+        assertThat(result).contains("min-width:400px;");
+    }
+
+    @Test
+    void tableWithIncompleteColWidthsDropsColgroupOnly() {
+        // 列宽缺失/非法时不转写（不猜测），但仍删除 colgroup——它是微信编辑器重建表格的高危节点；
+        // 固定布局下无宽度声明的列自动均分
+        String html = "<table><colgroup><col style=\"width: 40%\"><col></colgroup>"
+            + "<tbody><tr><td>甲</td><td>乙</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).doesNotContain("width:40%");
+        // 转写放弃时同样不补 min-width
+        assertThat(result).doesNotContain("min-width");
+    }
+
+    @Test
+    void tableKeepsFirstRowCellWidthSetInArticle() {
+        // 首行单元格本就带宽度（文章自定义）时不转写、不覆盖，但 colgroup 仍删除
+        String html = "<table><colgroup><col style=\"width: 30%\"><col style=\"width: 70%\"></colgroup>"
+            + "<tbody><tr><td style=\"width:60%;\">甲</td><td>乙</td></tr></tbody></table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("colgroup");
+        assertThat(result).contains("width:60%;");
+        assertThat(result).doesNotContain("width:30%");
+        // 首行单元格已有宽度时不转写，也不补 min-width
+        assertThat(result).doesNotContain("min-width");
+    }
+
+    @Test
+    void tableStructuralWhitespaceIsRemoved() {
+        // 表格结构标签之间的缩进/换行空白在微信编辑器重建结构时可能被误判成结构节点（多出空行），
+        // 应全部剔除；单元格内部的文字内容保持原样
+        String html = "<table>\n  <tbody>\n    <tr>\n      <td>值</td>\n    </tr>\n  </tbody>\n</table>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("\n");
+        assertThat(result).contains("<td style=");
+        assertThat(result).contains("值");
     }
 
     @Test
@@ -821,9 +966,11 @@ class WechatContentBeautifierTest {
         // 不再依赖 flex 与 class：重建为 2:1 宽度的表格布局
         assertThat(result).doesNotContain("display: flex");
         assertThat(result).doesNotContain("columns");
-        // 重建的布局表格带标记类（供 Console 预览补样式）与固定布局样式
+        // 重建的布局表格带标记类（供 Console 预览补样式）与固定布局样式；列宽直接写在单元格上，
+        // 不生成 colgroup（微信编辑器不识别它，草稿二次编辑时会被误解析出多余的空行/空框）
         assertThat(result).contains("class=\"wechat-layout-table\"");
         assertThat(result).contains("style=\"width:100%;border-collapse:collapse;table-layout:fixed;\"");
+        assertThat(result).doesNotContain("colgroup");
         assertThat(result).contains("width:66.67%");
         assertThat(result).contains("width:33.33%");
         // 列间距（编辑器默认 gap: 1em）折算为第二列的左内边距
@@ -842,9 +989,11 @@ class WechatContentBeautifierTest {
             + "</div>";
         String result = WechatContentBeautifier.beautify(html, null);
 
-        // 列宽 33.33% 同时出现在 colgroup 的 <col> 与单元格样式里，这里只数 <col> 的声明
-        int cols = result.split("<col style=\"width:33.33%;\">", -1).length - 1;
+        // 列宽 33.33% 写在三个单元格上：布局表格不再生成 colgroup（微信编辑器不识别它，
+        // 草稿二次编辑时会被误解析出多余的空行/空框）
+        int cols = result.split("width:33.33%", -1).length - 1;
         assertThat(cols).isEqualTo(3);
+        assertThat(result).doesNotContain("colgroup");
         assertThat(result).doesNotContain("display: flex");
     }
 
@@ -897,8 +1046,9 @@ class WechatContentBeautifierTest {
         assertThat(tables).isEqualTo(1);
         // 所有列等宽（不按宽高比 1.5:0.5 分宽）：两图行各占 50%，单图末行用 colspan 铺满整行
         assertThat(result).doesNotContain("width:75%");
-        assertThat(result).contains("width:50%");
-        int cols = result.split("<col style=\"width:50%;\">", -1).length - 1;
+        // 两图行每个单元格各占 50%（宽度直接写在单元格上，布局表格不再生成 colgroup）
+        assertThat(result).doesNotContain("colgroup");
+        int cols = result.split("width:50%", -1).length - 1;
         assertThat(cols).isEqualTo(2);
         assertThat(result).contains("colspan=\"2\"");
         assertThat(result).contains("width:100%");
@@ -930,11 +1080,13 @@ class WechatContentBeautifierTest {
             + "</div></div>";
         String result = WechatContentBeautifier.beautify(html, null);
 
-        // 整张画廊仍是一个表格，6 条 colgroup 声明 16.67% 等宽列
+        // 整张画廊仍是一个表格；列宽不用 colgroup 承载（微信编辑器不识别），直接写在首行单元格上：
+        // 6 列统一网格下 3 图行每图跨 2 列（各 33.33%）
         int tables = result.split("<table ", -1).length - 1;
         assertThat(tables).isEqualTo(1);
-        int cols = result.split("<col style=\"width:16.67%;\">", -1).length - 1;
-        assertThat(cols).isEqualTo(6);
+        assertThat(result).doesNotContain("colgroup");
+        int cols = result.split("width:33.33%", -1).length - 1;
+        assertThat(cols).isEqualTo(3);
         // 3 图行每图跨 2 列、2 图行每图跨 3 列（都铺满整行）
         int span2 = result.split("colspan=\"2\"", -1).length - 1;
         assertThat(span2).isEqualTo(3);

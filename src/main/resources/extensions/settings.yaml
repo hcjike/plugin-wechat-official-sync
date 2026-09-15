@@ -188,6 +188,17 @@ spec:
           value: "#e6e6e6"
           validation: required
         - $formkit: select
+          name: tableWidthMode
+          id: tableWidthMode
+          label: 表格宽度模式
+          value: "proportional"
+          options:
+            - value: "proportional"
+              label: 保持比例
+            - value: "fill"
+              label: 宽度铺满
+          help: 保持比例：按文章表格的原始列宽比例渲染，列宽超出屏幕时可在微信里横向滚动查看全貌（推荐）；宽度铺满：列宽按比例压缩进屏幕，表格始终铺满微信屏宽、不产生横向滚动。
+        - $formkit: select
           name: columnsLayoutStyle
           id: columnsLayoutStyle
           label: 分栏卡片版式

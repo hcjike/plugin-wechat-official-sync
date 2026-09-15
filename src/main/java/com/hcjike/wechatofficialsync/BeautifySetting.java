@@ -23,6 +23,12 @@ public class BeautifySetting {
     /** {@link #columnsLayoutStyle} / {@link #galleryLayoutStyle} 取值：独占一行——分栏每栏一行、画廊每张图片一行。 */
     public static final String LAYOUT_STYLE_STACKED = "stacked";
 
+    /** {@link #tableWidthMode} 取值：保持比例（默认）——保留文章表格的原始列宽，列宽超出屏宽时由外层容器横向滚动查看全貌。 */
+    public static final String TABLE_WIDTH_MODE_PROPORTIONAL = "proportional";
+
+    /** {@link #tableWidthMode} 取值：宽度铺满——列宽按比例压缩进屏宽，表格始终铺满屏幕、不产生横向滚动。 */
+    public static final String TABLE_WIDTH_MODE_FILL = "fill";
+
     /** 正文文字颜色（段落、列表、表格正文与根节点）。 */
     private String textColor = "#3f3f3f";
 
@@ -100,4 +106,11 @@ public class BeautifySetting {
      * {@link #LAYOUT_STYLE_STACKED}（独占一行——每张图片一行，图片与描述内容照常保留）。取值非法时按表格处理。
      */
     private String galleryLayoutStyle = LAYOUT_STYLE_TABLE;
+
+    /**
+     * 表格宽度模式：{@link #TABLE_WIDTH_MODE_PROPORTIONAL}（默认，保持比例——列宽按文章原样保留，
+     * 列宽总和超出屏宽时表格由外层容器横向滚动查看全貌）或 {@link #TABLE_WIDTH_MODE_FILL}（宽度铺满
+     * ——列宽按比例归一化为百分比并强制表格宽度铺满，始终收敛在屏宽内）。取值非法时按保持比例处理。
+     */
+    private String tableWidthMode = TABLE_WIDTH_MODE_PROPORTIONAL;
 }
