@@ -118,8 +118,10 @@ final class WechatContentBeautifier {
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
 
     /**
-     * 表格外层横向滚动容器（兜底）：表格默认铺满微信屏宽（见 {@link #TABLE_STYLE}），仅当文章为表格/列宽
-     * 设置了超出屏宽的固定宽度时，{@code overflow-x:auto} 让表格可横向滚动查看全貌，与代码块的横向拖拽观感一致。
+     * 表格外层横向滚动容器（兜底）：表格默认铺满微信屏宽（见 {@link #TABLE_STYLE}），仅在「保持比例」
+     * 宽度模式（{@link BeautifySetting#TABLE_WIDTH_MODE_PROPORTIONAL}）下文章列宽总和超出屏宽时
+     * （表格带 {@code min-width} 托底总宽），{@code overflow-x:auto} 让表格可横向滚动查看全貌，与代码块
+     * 的横向拖拽观感一致；「宽度铺满」模式下列宽已收敛在屏宽内，该容器不触发滚动。
      */
     private static final String TABLE_SCROLL_WRAPPER =
         "margin:1em 0;overflow-x:auto;-webkit-overflow-scrolling:touch;";
@@ -127,15 +129,21 @@ final class WechatContentBeautifier {
     /**
      * 表格本体：默认 {@code width:100%} <b>铺满屏宽</b>（页面宽度自适应），与微信编辑器插入表格的观感一致；
      * 若文章已为表格设置具体宽度，用户内联 {@code width} 因「默认在前、原有在后」而优先生效
-     * （见 {@link #applyStyle}）。同时补回 {@code table-layout:fixed}：Halo/TipTap 编辑器表格本依赖它
-     * （来自样式表）但被微信剥离；固定布局下列宽按文章 {@code <colgroup>} 设定的比例渲染，单元格内容在
-     * 列宽内自动换行；仅当文章设置了超出屏宽的固定列宽时表格才整体溢出，由外层容器横向滚动兜底。
+     * （见 {@link #applyStyle}；「宽度铺满」模式下由 {@link #applyTableFillWidth} 覆盖为 100%）。
+     * 同时补回 {@code table-layout:fixed}：Halo/TipTap 编辑器表格本依赖它（来自样式表）但被微信剥离；
+     * 固定布局下列宽按<b>首行单元格</b>的 {@code width} 渲染（文章 {@code <colgroup>} 的列宽已在
+     * {@link #normalizeTables} 中转写到首行单元格、colgroup 随之删除），单元格内容在列宽内自动换行。
+     * 列宽载体与兜底按 {@link BeautifySetting#getTableWidthMode()} 处理：两模式都把列宽归一化为
+     * 百分比转写到首行单元格——实测微信渲染会丢弃单元格上的像素列宽、把表格压回屏宽，百分比才是
+     * 可靠载体（见 {@link #writeFirstRowWidths}）；「保持比例」（默认）另在表格上补 {@code min-width}
+     * （列宽总和）——与生效中的 {@code width:100%} 同属表格内联样式，屏宽够大时仍铺满，总宽超出屏宽时
+     * 表格整体溢出、由外层容器横向滚动兜底；「宽度铺满」不加 min-width，始终收敛在屏宽内。
      */
     private static final String TABLE_STYLE =
         "border-collapse:collapse;width:100%;font-size:15px;table-layout:fixed;";
 
     /**
-     * 单元格换行策略：固定布局下列宽已由 {@code <colgroup>} 确定，内容自然在列内换行；仅需
+     * 单元格换行策略：固定布局下列宽已由首行单元格宽度确定，内容自然在列内换行；仅需
      * {@code overflow-wrap:break-word} 折断超长 token（如 URL）防止其溢出列宽、遮挡相邻列。
      * <b>不用 {@code overflow-wrap:anywhere}</b>：它会塌缩最小内容宽度，在自动布局下把表格压成满宽、丢失横向滚动。
      */
@@ -201,6 +209,16 @@ final class WechatContentBeautifier {
     private static final Pattern SIZE_NUMBER = Pattern.compile("([\\d.]+)");
 
     /**
+     * 内联样式中的 {@code width} 声明（像素/百分比）；负向后行断言跳过 {@code min-width}/{@code max-width}
+     * 中的 width 子串。用于解析 {@code <colgroup>} 列宽与检查单元格既有宽度。
+     */
+    private static final Pattern STYLE_WIDTH =
+        Pattern.compile("(?<![-a-zA-Z])width\\s*:\\s*([\\d.]+)\\s*(px|%)?");
+
+    /** 单条 {@code <col span>} 允许展开的最大列数（防御异常 HTML 造成超长列表）。 */
+    private static final int MAX_COL_SPAN = 1000;
+
+    /**
      * 以<b>转义文本</b>形式残留在正文里的 {@code <style>}/{@code <script>} 块：从其他平台粘贴或
      * 导入 HTML 文章时，原始标签常被编辑器转义为纯文本（形如 {@code &lt;style&gt;.a{}&lt;/style&gt;}），
      * 解析后是普通文本而非元素，{@link #sanitize} 的标签选择器删不到，会以可见源码的形式出现在
@@ -224,7 +242,7 @@ final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、表格宽度模式、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     static String beautify(String html, BeautifySetting config) {
@@ -255,9 +273,18 @@ final class WechatContentBeautifier {
         // 代码块重建须在通用样式注入前：重建为微信原生 code-snippet 结构（行号列 + 逐行 code 的 pre），
         // 通用样式注入会跳过该结构，结构外剩余 <code> 即行内代码
         buildCodeBlocks(body);
+        // 表格结构归一化须在包裹与样式注入前：colgroup 列宽归一化为百分比转写到首行单元格（「保持
+        // 比例」另给表格补 min-width 托底原始总宽），随后删除 colgroup（微信编辑器不识别它，草稿在
+        // 编辑器里二次编辑重建时容易被误解析出多余的空行/空框）、压紧结构空白
+        normalizeTables(body, cfg);
         // 表格包裹须在通用样式注入前：外层滚动容器就位后，table/th/td 样式仍按标签名注入
         buildTables(body);
         injectStyles(body, cfg);
+        // 「宽度铺满」模式：列宽已归一化为百分比，再把表格宽度强制为 100%（覆盖文章自定义宽度），
+        // 保证表格收敛在屏宽内、不触发横向滚动；布局表格在其后重建、不受影响
+        if (isTableWidthFill(cfg)) {
+            applyTableFillWidth(body);
+        }
         wrapWithBase(body, cfg);
         // 分栏卡片与画廊按各自配置重建版式（表格/独占一行）：微信会过滤 display:grid、flex 支持不稳定，
         // 直接同步会导致各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
@@ -782,9 +809,10 @@ final class WechatContentBeautifier {
      * 把每个 {@code <table>} 包进一个横向滚动的 {@code <section>} 容器，并移除 Halo/TipTap 编辑器的
      * {@code <div class="tableWrapper">} 多余包裹层。
      *
-     * <p>表格默认 {@code width:100%} 铺满屏宽、{@code table-layout:fixed}（见 {@link #TABLE_STYLE}）按文章
-     * {@code <colgroup>} 设定的比例渲染列宽，单元格内容在列内自动换行；仅当文章设置了超出屏宽的固定宽度时，
-     * 表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动兜底查看全貌。</p>
+     * <p>表格默认 {@code width:100%} 铺满屏宽、{@code table-layout:fixed}（见 {@link #TABLE_STYLE}）按首行
+     * 单元格的宽度渲染列宽（{@code <colgroup>} 的列宽已由 {@link #normalizeTables} 转写到首行单元格），
+     * 单元格内容在列内自动换行；「保持比例」模式下表格带 {@code min-width}（原始列宽总和），总宽超出
+     * 屏宽时表格整体溢出容器，由 {@code overflow-x:auto} 横向滚动兜底查看全貌。</p>
      *
      * <p>Halo/TipTap 编辑器输出的表格通常被 {@code <div class="tableWrapper">} 包裹，该 div 在微信中无实际
      * 作用（class 会被剥离），且多层嵌套会触发微信编辑器重构 DOM、在表格前后插入空段落（表现为发布后
@@ -804,6 +832,225 @@ final class WechatContentBeautifier {
                 table.before(wrapper);
             }
             wrapper.appendChild(table);
+        }
+    }
+
+    /**
+     * 归一化表格结构，使产物更贴近微信编辑器「插入表格」的原生结构：
+     *
+     * <ul>
+     *   <li><b>压平 {@code <colgroup>} 列宽</b>：微信编辑器（及多数富文本编辑器）的表格模型不认识
+     *       {@code <colgroup>}/{@code <col>}——草稿在编辑器里二次编辑、结构被重建时，这些节点容易被
+     *       误解析成多余的空行/空框（表现为表格上多出莫名的外边框与无内容的表格部分）。故把各列宽度按
+     *       {@code colspan} 合并、以百分比转写到<b>首行单元格</b>的 {@code width} 上（固定布局下首行宽度
+     *       即列宽，与微信编辑器按单元格记录列宽的行为一致），随后删除 {@code <colgroup>}；「保持比例」
+     *       模式另给表格补 {@code min-width} 托底原始总宽（见 {@link #moveColgroupWidths}）；</li>
+     *   <li><b>压紧结构空白</b>：删除表格结构标签（{@code table}/{@code thead}/{@code tbody}/{@code tfoot}/
+     *       {@code tr}）之间的纯空白文本节点——微信编辑器重建结构时对标签间空白敏感，可能把这些排版
+     *       缩进误判成结构节点。</li>
+     * </ul>
+     *
+     * <p>须在 {@link #buildTables} 包裹与 {@link #injectStyles} 注入之前执行：转写的宽度处于各单元格
+     * 既有样式之后，后续通用样式注入时仍优先生效。</p>
+     */
+    private static void normalizeTables(Element body, BeautifySetting cfg) {
+        boolean fillMode = isTableWidthFill(cfg);
+        for (Element table : body.select("table")) {
+            moveColgroupWidths(table, fillMode);
+            removeTableStructuralWhitespace(table);
+        }
+    }
+
+    /**
+     * 把 {@code <colgroup>} 的列宽转写到首行单元格并删除该 {@code <colgroup>}（见 {@link #normalizeTables}）：
+     * 解析各 {@code <col>} 宽度（百分比/像素均可），按首行各单元格的 {@code colspan} 合并后以百分比写入
+     * （见 {@link #writeFirstRowWidths}）；「保持比例」模式另给表格补 {@code min-width} 托底原始总宽
+     * （总宽超出屏宽时表格溢出、横向滚动），「宽度铺满」模式则收敛在屏宽内。任一列宽度缺失、单位混用或
+     * 首行结构与列数对不上时放弃转写（仅删除 colgroup，列宽回退为固定布局均分）。
+     */
+    private static void moveColgroupWidths(Element table, boolean fillMode) {
+        Element colgroup = null;
+        for (Element child : table.children()) {
+            if ("colgroup".equalsIgnoreCase(child.tagName())) {
+                colgroup = child;
+                break;
+            }
+        }
+        if (colgroup == null) {
+            return;
+        }
+        ColWidths widths = colWidths(colgroup);
+        if (widths != null) {
+            writeFirstRowWidths(table, widths, fillMode);
+        }
+        colgroup.remove();
+    }
+
+    /**
+     * {@code <colgroup>} 的解析结果：{@code values} 为各列宽度值（{@code <col span>} 已按跨列数展开），
+     * {@code percent} 标记整组是否百分比单位（解析时保证单位一致）。
+     */
+    private record ColWidths(List<Double> values, boolean percent) {
+    }
+
+    /**
+     * 解析 {@code <colgroup>} 中各列的宽度：每列宽度须为可解析的正数且单位一致（全部带 {@code %}
+     * 或全部为像素/无单位）；任一列缺失或不符合时返回 {@code null}（放弃转写）。{@code <col span>}
+     * 代表跨多列，宽度按跨列数展开。
+     */
+    private static ColWidths colWidths(Element colgroup) {
+        List<Double> values = new ArrayList<>();
+        Boolean percent = null;
+        for (Element col : colgroup.children()) {
+            if (!"col".equalsIgnoreCase(col.tagName())) {
+                continue;
+            }
+            Matcher matcher = STYLE_WIDTH.matcher(col.attr("style"));
+            if (!matcher.find()) {
+                return null;
+            }
+            double value;
+            try {
+                value = Double.parseDouble(matcher.group(1));
+            } catch (NumberFormatException e) {
+                return null;
+            }
+            if (value <= 0) {
+                return null;
+            }
+            boolean isPercent = "%".equals(matcher.group(2));
+            if (percent == null) {
+                percent = isPercent;
+            } else if (percent != isPercent) {
+                return null;
+            }
+            int span = 1;
+            String spanAttr = col.attr("span");
+            if (!spanAttr.isBlank()) {
+                try {
+                    span = Integer.parseInt(spanAttr.trim());
+                } catch (NumberFormatException e) {
+                    return null;
+                }
+                if (span < 1 || span > MAX_COL_SPAN) {
+                    return null;
+                }
+            }
+            for (int i = 0; i < span; i++) {
+                values.add(value);
+            }
+        }
+        return values.isEmpty() ? null : new ColWidths(values, percent);
+    }
+
+    /**
+     * 把列宽按首行单元格的 {@code colspan} 合并、以归一化百分比（覆盖列宽 ÷ 总宽）写入其内联样式末尾
+     * （原有样式在前、转写宽度在后）：百分比是微信渲染可靠保留的列宽载体——实测像素列宽会被微信丢弃、
+     * 表格被压回屏宽。另于「保持比例」模式且列宽为像素时，给 {@code <table>} 追加
+     * {@code min-width:列宽总和px} 托底原始总宽：总宽超出屏宽时表格整体溢出、由外层容器横向滚动查看
+     * 全貌，屏宽够大时仍由默认 {@code width:100%} 铺满。首行缺失、覆盖列数与 {@code <colgroup>} 对不上、
+     * {@code colspan} 非法或单元格已有 {@code width} 声明时整体跳过（尊重原有结构，不猜测）。
+     */
+    private static void writeFirstRowWidths(Element table, ColWidths widths, boolean fillMode) {
+        Element row = table.selectFirst("tr");
+        if (row == null) {
+            return;
+        }
+        List<Element> cells = new ArrayList<>();
+        for (Element cell : row.children()) {
+            if ("td".equalsIgnoreCase(cell.tagName()) || "th".equalsIgnoreCase(cell.tagName())) {
+                cells.add(cell);
+            }
+        }
+        if (cells.isEmpty()) {
+            return;
+        }
+        List<Integer> spans = new ArrayList<>(cells.size());
+        int coveredColumns = 0;
+        for (Element cell : cells) {
+            // 首行单元格已有宽度声明（文章自定义）时尊重原有值，不转写、不覆盖
+            if (STYLE_WIDTH.matcher(cell.attr("style")).find()) {
+                return;
+            }
+            Integer span = cellColspan(cell);
+            if (span == null) {
+                return;
+            }
+            spans.add(span);
+            coveredColumns += span;
+        }
+        if (coveredColumns != widths.values().size()) {
+            return;
+        }
+        double total = 0;
+        for (Double value : widths.values()) {
+            total += value;
+        }
+        int index = 0;
+        for (int i = 0; i < cells.size(); i++) {
+            double covered = 0;
+            for (int j = index; j < index + spans.get(i); j++) {
+                covered += widths.values().get(j);
+            }
+            index += spans.get(i);
+            overrideStyle(cells.get(i), "width:" + formatPercent(covered / total) + ";");
+        }
+        // 「保持比例」+ 像素列宽：表格补 min-width=列宽总和托底原始总宽。微信渲染会丢弃单元格上的
+        // 像素列宽、把表格压回屏宽；min-width 与生效中的 width:100% 同属表格内联样式，只要样式被应用
+        // 表格宽度就不低于原始总宽——超出屏宽时整体溢出、由外层容器横向滚动，屏宽够大时仍铺满
+        if (!fillMode && !widths.percent()) {
+            overrideStyle(table, "min-width:" + formatNumber(total) + "px;");
+        }
+    }
+
+    /** 解析单元格 {@code colspan}（无属性按 1）；值非法（非整数或小于 1）返回 {@code null}。 */
+    private static Integer cellColspan(Element cell) {
+        String colspan = cell.attr("colspan");
+        if (colspan.isBlank()) {
+            return 1;
+        }
+        try {
+            int value = Integer.parseInt(colspan.trim());
+            return value >= 1 ? value : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * 删除表格结构标签（{@code table}/{@code thead}/{@code tbody}/{@code tfoot}/{@code tr}）之间的纯空白
+     * 文本节点（含 {@code &nbsp;}/零宽字符）：这些排版缩进在微信编辑器二次编辑、重建结构时可能被误判成
+     * 结构节点（如多出一行/一列）；单元格 {@code td}/{@code th} 内部的内容空白保持原样。
+     */
+    private static void removeTableStructuralWhitespace(Element table) {
+        for (Element element : table.getAllElements()) {
+            String tag = element.tagName().toLowerCase(java.util.Locale.ROOT);
+            if (!"table".equals(tag) && !"thead".equals(tag) && !"tbody".equals(tag)
+                && !"tfoot".equals(tag) && !"tr".equals(tag)) {
+                continue;
+            }
+            for (Node child : new ArrayList<>(element.childNodes())) {
+                if (child instanceof TextNode text && hasNoVisibleText(text.getWholeText())) {
+                    text.remove();
+                }
+            }
+        }
+    }
+
+    /** 表格宽度模式是否为「宽度铺满」（{@link BeautifySetting#TABLE_WIDTH_MODE_FILL}）；缺省/非法值按「保持比例」处理。 */
+    private static boolean isTableWidthFill(BeautifySetting cfg) {
+        return BeautifySetting.TABLE_WIDTH_MODE_FILL.equalsIgnoreCase(cfg.getTableWidthMode());
+    }
+
+    /**
+     * 「宽度铺满」模式：把正文表格的宽度强制为 {@code 100%}（追加在各表格现有内联样式之后，覆盖文章
+     * 自定义的固定宽度）——与 {@link #normalizeTables} 的列宽归一化（百分比）配套，表格与列宽始终收敛
+     * 在屏宽内、不产生横向滚动。须在 {@link #injectStyles} 之后、{@link #rebuildBlockLayouts} 之前执行：
+     * 布局表格在其后创建，不受影响。
+     */
+    private static void applyTableFillWidth(Element body) {
+        for (Element table : body.select("table")) {
+            overrideStyle(table, "width:100%;");
         }
     }
 
@@ -913,7 +1160,6 @@ final class WechatContentBeautifier {
             int gap = columnGapPx(container.attr("style"));
             Element table = createLayoutTable();
             Element tbody = table.child(0);
-            addColgroup(table, ratios);
             Element row = new Element(Tag.valueOf("tr"), "");
             tbody.appendChild(row);
             for (int c = 0; c < columns.size(); c++) {
@@ -956,7 +1202,6 @@ final class WechatContentBeautifier {
             int columns = galleryGridColumns(rows);
             Element table = createLayoutTable();
             Element tbody = table.child(0);
-            addColgroup(table, uniformRatios(columns));
             for (int r = 0; r < rows.size(); r++) {
                 List<Element> items = rows.get(r);
                 // 行内均分：跨列数 = 统一网格列数 / 该行图片数（最小公倍数保证整除，末行不满时也铺满整行）
@@ -1040,26 +1285,6 @@ final class WechatContentBeautifier {
     }
 
     /**
-     * 给布局表格插入 {@code <colgroup>} 声明各列宽度占比：与 {@code table-layout:fixed} 搭配时列宽
-     * 由 {@code <col>} 决定，与微信编辑器原生表格按 {@code <colgroup>} 渲染列宽的行为一致；单元格
-     * 自身也带相同的宽度样式，作为不支持 {@code colgroup} 的渲染器的兜底。
-     */
-    private static void addColgroup(Element table, List<Double> ratios) {
-        Element colgroup = new Element(Tag.valueOf("colgroup"), "");
-        for (Double ratio : ratios) {
-            Element col = new Element(Tag.valueOf("col"), "");
-            col.attr("style", "width:" + formatPercent(ratio) + ";");
-            colgroup.appendChild(col);
-        }
-        Element tbody = table.selectFirst("tbody");
-        if (tbody == null) {
-            table.appendChild(colgroup);
-        } else {
-            tbody.before(colgroup);
-        }
-    }
-
-    /**
      * 取出分栏容器的列元素：优先 class 含 {@code column} 或 {@code data-type="column"} 的直接子元素；
      * 都匹配不到时兜底取全部直接子元素（兼容其他渲染器/手写 HTML 的变体结构）。
      */
@@ -1109,15 +1334,6 @@ final class WechatContentBeautifier {
     /** 最大公约数：欧几里得算法。 */
     private static int gcd(int a, int b) {
         return b == 0 ? a : gcd(b, a % b);
-    }
-
-    /** 画廊统一网格的等宽列占比：{@code columns} 列各占 {@code 1/columns}。 */
-    private static List<Double> uniformRatios(int columns) {
-        List<Double> ratios = new ArrayList<>(columns);
-        for (int i = 0; i < columns; i++) {
-            ratios.add(1.0 / columns);
-        }
-        return ratios;
     }
 
     /** 把一组正数归一化为合计 1 的宽度占比；总和恰为 0 时按均分处理。 */
@@ -1206,10 +1422,15 @@ final class WechatContentBeautifier {
         return style.append("width:").append(formatPercent(ratio)).append(";").toString();
     }
 
-    /** 把 0–1 的宽度占比格式化为百分比（最多两位小数、整数不带小数点）：0.5 → {@code 50%}、1/3 → {@code 33.33%}。 */
+    /** 把 0–1 的宽度占比格式化为百分比：0.5 → {@code 50%}、1/3 → {@code 33.33%}。 */
     private static String formatPercent(double ratio) {
-        double percent = Math.round(ratio * 10000) / 100.0;
-        return percent == Math.rint(percent) ? (long) percent + "%" : percent + "%";
+        return formatNumber(ratio * 100) + "%";
+    }
+
+    /** 格式化宽度数值（最多两位小数、整数不带小数点）：250.0 → {@code 250}、33.3333 → {@code 33.33}。 */
+    private static String formatNumber(double value) {
+        double rounded = Math.round(value * 100) / 100.0;
+        return rounded == Math.rint(rounded) ? String.valueOf((long) rounded) : String.valueOf(rounded);
     }
 
     /** 把源元素的全部子节点按原顺序搬入目标元素（改挂载、不复制）；搬空后的源元素由调用方处置。 */
