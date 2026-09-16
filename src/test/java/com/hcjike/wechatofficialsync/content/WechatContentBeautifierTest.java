@@ -1246,4 +1246,216 @@ class WechatContentBeautifierTest {
         int images = result.split("<img ", -1).length - 1;
         assertThat(images).isEqualTo(2);
     }
+
+    @Test
+    void taskListIsRebuiltWithEmojiIcons() {
+        // Halo 任务列表（TipTap 结构）：微信会剥离 <input> 复选框（表单元素），勾选状态改用 Emoji 图标：
+        // 已完成 ✅、未完成 ⬜，图标置于行首；列表去掉圆点、任务项内段落收紧间距
+        String html = "<ul data-type=\"taskList\">"
+            + "<li data-checked=\"true\" data-type=\"taskItem\">"
+            + "<label><input type=\"checkbox\" checked=\"checked\"><span></span></label>"
+            + "<div><p>已完成任务</p></div></li>"
+            + "<li data-checked=\"false\" data-type=\"taskItem\">"
+            + "<label><input type=\"checkbox\"><span></span></label>"
+            + "<div><p>未完成任务</p></div></li>"
+            + "</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // checkbox 标记整体移除，编辑器私有数据属性不留存
+        assertThat(result).doesNotContain("<input");
+        assertThat(result).doesNotContain("<label");
+        assertThat(result).doesNotContain("taskItem");
+        // 列表去掉默认圆点（行首标记即图标）
+        assertThat(result).contains("<ul data-type=\"taskList\" style=\"margin:0.9em 0;padding-left:0;list-style:none;\">");
+        assertThat(result).doesNotContain("list-style:disc");
+        // 已完成 ✅、未完成 ⬜，图标与内容同行
+        assertThat(result).contains("✅ 已完成任务");
+        assertThat(result).contains("⬜ 未完成任务");
+        // 任务项内段落不沿用正文段落的宽松间距
+        assertThat(result).contains("<p style=\"margin:0.25em 0");
+        assertThat(result).doesNotContain("<p style=\"margin:0.9em 0");
+    }
+
+    @Test
+    void taskItemCheckedAttributeVariants() {
+        // 勾选判定兼容 TipTap 的 parseHTML 逻辑：data-checked="" 与 "true" 都视为已完成；缺失属性视为未完成
+        String html = "<ul data-type=\"taskList\">"
+            + "<li data-checked=\"\" data-type=\"taskItem\"><label><input type=\"checkbox\"><span></span></label>"
+            + "<div><p>空串勾选</p></div></li>"
+            + "<li data-type=\"taskItem\"><label><input type=\"checkbox\"><span></span></label>"
+            + "<div><p>缺失属性</p></div></li>"
+            + "</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("✅ 空串勾选");
+        assertThat(result).contains("⬜ 缺失属性");
+    }
+
+    @Test
+    void plainMarkdownTaskLinesBecomeIcons() {
+        // 从其他平台粘贴的纯文本 markdown 任务清单（未渲染成任务列表）也转为图标呈现：
+        // 兼容 <br> 分隔与文本内换行分隔，以及 * 项目符号与 [X] 大写勾选
+        String html = "<p>- [ ] 待办一<br>- [x] 已完成二<br>* [X] 大写勾选</p>"
+            + "<p>- [ ] 待办三\n- [x] 已完成四</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("⬜ 待办一");
+        assertThat(result).contains("✅ 已完成二");
+        assertThat(result).contains("✅ 大写勾选");
+        assertThat(result).contains("⬜ 待办三");
+        assertThat(result).contains("✅ 已完成四");
+        assertThat(result).doesNotContain("- [ ]");
+        assertThat(result).doesNotContain("[x]");
+    }
+
+    @Test
+    void markdownTaskMarkerNotAtLineStartIsKept() {
+        // 正文中间出现的 - [ ]（非行首）属正常文字，不做替换
+        String html = "<p>说明：- [ ] 不是任务清单</p><p>前缀 - [x] 也不算</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("说明：- [ ] 不是任务清单");
+        assertThat(result).contains("前缀 - [x] 也不算");
+        assertThat(result).doesNotContain("⬜");
+        assertThat(result).doesNotContain("✅");
+    }
+
+    @Test
+    void markdownTaskMarkerInsideCodeBlockIsKept() {
+        // 代码块中的 markdown 任务清单属文章示例，原样保留
+        String html = "<pre><code>- [x] 示例</code></pre>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("- [x] 示例");
+        assertThat(result).doesNotContain("✅");
+    }
+
+    @Test
+    void nestedTaskListIsRebuiltFromInsideOut() {
+        // 嵌套任务列表：内层先重建，外层重建搬运时内层已是图标结构
+        String html = "<ul data-type=\"taskList\">"
+            + "<li data-checked=\"true\" data-type=\"taskItem\">"
+            + "<label><input type=\"checkbox\" checked=\"checked\"><span></span></label>"
+            + "<div><p>父项</p>"
+            + "<ul data-type=\"taskList\"><li data-checked=\"false\" data-type=\"taskItem\">"
+            + "<label><input type=\"checkbox\"><span></span></label><div><p>子项</p></div></li></ul>"
+            + "</div></li></ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<input");
+        assertThat(result).contains("✅ 父项");
+        assertThat(result).contains("⬜ 子项");
+        int lists = result.split("data-type=\"taskList\"", -1).length - 1;
+        assertThat(lists).isEqualTo(2);
+    }
+
+    @Test
+    void plainListNestedInTaskItemKeepsBulletStyle() {
+        // 任务项内容里更深层嵌套的普通列表不受任务列表影响，照常注入圆点样式
+        String html = "<ul data-type=\"taskList\">"
+            + "<li data-checked=\"false\" data-type=\"taskItem\">"
+            + "<label><input type=\"checkbox\"><span></span></label>"
+            + "<div><p>任务</p><ul><li>普通子列表</li></ul></div></li></ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("⬜ 任务");
+        assertThat(result).contains("普通子列表");
+        assertThat(result).contains("list-style:disc");
+        assertThat(result).contains("list-style:none");
+    }
+
+    @Test
+    void markdownTaskListIsRebuiltWithEmojiIcons() {
+        // markdown 渲染输出的 GFM 任务列表（如「Markdown 编辑块」的 marked 输出）：li 内直接是
+        // input[type=checkbox]，微信同样会剥离复选框，须与 TipTap 任务列表一致地重建为 Emoji 图标
+        String html = "<div class=\"markdown-edited\"><ul>\n"
+            + "<li><input disabled=\"\" type=\"checkbox\"> 未完成事项</li>\n"
+            + "<li><input checked=\"\" disabled=\"\" type=\"checkbox\"> 已完成事项</li>\n"
+            + "</ul>\n</div>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 复选框整体移除，图标与内容同行
+        assertThat(result).doesNotContain("<input");
+        assertThat(result).contains("⬜ 未完成事项");
+        assertThat(result).contains("✅ 已完成事项");
+        // 列表补任务列表标记并去掉默认圆点，任务项写入任务项样式
+        assertThat(result).contains("data-type=\"taskList\"");
+        assertThat(result).contains("list-style:none");
+        assertThat(result).doesNotContain("list-style:disc");
+        assertThat(result).contains("line-height:1.75;font-size:16px;");
+    }
+
+    @Test
+    void markdownTaskListCheckedAttributeVariants() {
+        // 勾选判定兼容 checked=""（marked 输出）与 checked="checked"（其他渲染器/手工 HTML）；
+        // 缺失该属性视为未完成
+        String html = "<ul>"
+            + "<li><input type=\"checkbox\" checked=\"\"> 空串勾选</li>"
+            + "<li><input type=\"checkbox\" checked=\"checked\"> 同名值勾选</li>"
+            + "<li><input type=\"checkbox\"> 缺失属性</li>"
+            + "</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("✅ 空串勾选");
+        assertThat(result).contains("✅ 同名值勾选");
+        assertThat(result).contains("⬜ 缺失属性");
+    }
+
+    @Test
+    void looseMarkdownTaskListIconStaysInFirstParagraph() {
+        // 松散列表（项间有空行）的复选框位于段首 <p> 内，图标就地替换后与首段同行；段落按任务项间距注入
+        String html = "<ul>\n"
+            + "<li><p><input disabled=\"\" type=\"checkbox\"> \n第一项</p>\n<p>补充说明</p>\n</li>\n"
+            + "</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<input");
+        // 图标紧随首段 <p> 开头
+        assertThat(result).contains(">⬜");
+        assertThat(result).contains("第一项");
+        assertThat(result).contains("补充说明");
+        // 任务项内段落收紧间距
+        assertThat(result).contains("margin:0.25em 0");
+    }
+
+    @Test
+    void nestedMarkdownTaskListIsRebuiltFromInsideOut() {
+        // markdown 嵌套任务列表（子列表在父任务项内）：内层先重建，外层重建搬运时内层已是图标结构
+        String html = "<ul>\n"
+            + "<li><input disabled=\"\" type=\"checkbox\"> 父项\n"
+            + "<ul>\n<li><input checked=\"\" disabled=\"\" type=\"checkbox\"> 子项</li>\n</ul>\n</li>\n</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<input");
+        assertThat(result).contains("⬜ 父项");
+        assertThat(result).contains("✅ 子项");
+        int lists = result.split("data-type=\"taskList\"", -1).length - 1;
+        assertThat(lists).isEqualTo(2);
+    }
+
+    @Test
+    void markdownPlainListKeepsBulletStyle() {
+        // 不含复选框的普通 markdown 列表不受任务列表重建影响，照常注入圆点样式
+        String html = "<ul>\n<li>普通项一</li>\n<li>普通项二</li>\n</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("list-style:disc");
+        assertThat(result).contains("普通项一");
+        assertThat(result).doesNotContain("data-type=\"taskList\"");
+        assertThat(result).doesNotContain("⬜");
+    }
+
+    @Test
+    void markdownPlainListNestedInTaskItemKeepsBulletStyle() {
+        // markdown 任务项内容里更深层嵌套的普通列表不受任务列表影响，照常注入圆点样式
+        String html = "<ul>\n"
+            + "<li><input disabled=\"\" type=\"checkbox\"> 任务项\n"
+            + "<ul>\n<li>普通子项</li>\n</ul>\n</li>\n</ul>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("⬜ 任务项");
+        assertThat(result).contains("普通子项");
+        assertThat(result).contains("list-style:disc");
+        assertThat(result).contains("list-style:none");
+    }
 }

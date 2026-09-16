@@ -25,7 +25,7 @@ import tools.jackson.databind.json.JsonMapper;
  * <p>微信图文与邮件客户端类似，会剥离 {@code <head>}/{@code <style>}/外部 {@code <link>} CSS，并过滤
  * {@code class}/{@code id} 属性，<b>只保留元素上的内联 {@code style="..."} 属性</b>。而 Halo 正文靠主题
  * class + 外部 CSS 排版，直接塞进草稿会丢样式变成「裸 HTML」。本类按<b>标签名</b>为常见元素注入内联样式
- * （标题/段落/引用/代码块/图片自适应/列表/表格/链接等），对标 doocs/md 的默认排版效果。</p>
+ * （标题/段落/引用/代码块/图片自适应/列表/任务列表/表格/链接等），对标 doocs/md 的默认排版效果。</p>
 
  * <p>注入策略：我们的默认样式写在<b>前</b>、元素原有内联样式写在<b>后</b>。同一 {@code style} 属性内后出现的
  * 同名属性覆盖先出现的，故用户在编辑器里已设置的行内样式优先级更高，本类只补齐缺省样式，不覆盖用户意图。
@@ -170,6 +170,23 @@ public final class WechatContentBeautifier {
     /** 折叠块标题栏前缀标记（呼应 Halo 编辑器折叠块的展开箭头）。 */
     private static final String DETAILS_MARKER = "▸";
 
+    /** 任务列表已完成项的行首图标：微信会剥离 {@code <input>} 复选框，勾选状态用 Emoji 表达。 */
+    private static final String TASK_CHECKED_ICON = "✅";
+
+    /** 任务列表未完成项的行首图标。 */
+    private static final String TASK_UNCHECKED_ICON = "⬜";
+
+    /** 任务列表容器样式：去掉列表默认圆点与缩进（行首标记即 Emoji 图标），上下外边距对齐正文列表。 */
+    private static final String TASK_LIST_STYLE = "margin:0.9em 0;padding-left:0;list-style:none;";
+
+    /**
+     * 正文中以<b>纯文本</b>残留的 markdown 任务清单行首标记：行首的 {@code - [ ] 事项} /
+     * {@code - [x] 事项}（兼容 {@code *}/{@code +} 项目符号与 {@code [X]} 大写勾选）。缩进仅匹配
+     * 空格/制表符（不吃换行，避免多行文本跨行误匹配）；{@code ]} 后允许行尾（无内容的空任务项）。
+     */
+    private static final Pattern TASK_LIST_TEXT_LINE = Pattern.compile(
+        "^([ \\t]*)[-+*][ \\t]+\\[([ xX])\\](?:[ \\t]+|$)", Pattern.MULTILINE);
+
     /**
      * 布局表格样式（分栏卡片/画廊重建用）：铺满屏宽、固定布局按单元格百分比宽度分配列宽、
      * 不带正文表格的边框与内边距。布局表格在通用样式注入<b>之后</b>重建，不受 {@link #TABLE_STYLE} 影响。
@@ -274,6 +291,13 @@ public final class WechatContentBeautifier {
         // 代码块重建须在通用样式注入前：重建为微信原生 code-snippet 结构（行号列 + 逐行 code 的 pre），
         // 通用样式注入会跳过该结构，结构外剩余 <code> 即行内代码
         buildCodeBlocks(body);
+        // 任务列表重建为「Emoji 图标 + 内容」：微信会剥离 <input> 复选框、勾选状态无法呈现。
+        // 覆盖两种来源——Halo 默认编辑器（TipTap）的待办清单与 markdown 渲染输出（如「Markdown
+        // 编辑块」）的 GFM 任务列表；须在通用样式注入前完成：重建后的 ul/li 样式由本步精确写入、
+        // 注入阶段跳过，任务项内段落由段落循环按任务项间距注入
+        buildTaskLists(body, cfg);
+        // 正文中以纯文本残留的 markdown 任务清单（- [ ] 事项 / - [x] 事项）替换为图标呈现
+        convertTaskListText(body);
         // 表格结构归一化须在包裹与样式注入前：colgroup 列宽归一化为百分比转写到首行单元格（「保持
         // 比例」另给表格补 min-width 托底原始总宽），随后删除 colgroup（微信编辑器不识别它，草稿在
         // 编辑器里二次编辑重建时容易被误解析出多余的空行/空框）、压紧结构空白
@@ -339,6 +363,83 @@ public final class WechatContentBeautifier {
                 }
             }
         }
+    }
+
+    /**
+     * 把正文里以纯文本残留的 markdown 任务清单标记替换为任务图标（{@link #TASK_CHECKED_ICON}/
+     * {@link #TASK_UNCHECKED_ICON}）：从其他平台粘贴的 markdown 文本不会被渲染成任务列表，直接同步
+     * 会以「- [x] 事项」的源码形式展示。仅处理<b>行首</b>标记（正文中间的 {@code - [ ]} 属正常文字），
+     * 代码块（{@code <pre>}/{@code <code>}）中的示例原样保留。
+     */
+    private static void convertTaskListText(Element body) {
+        for (Element element : body.getAllElements()) {
+            for (Node node : new ArrayList<>(element.childNodes())) {
+                if (!(node instanceof TextNode textNode) || isInsideCode(textNode)) {
+                    continue;
+                }
+                replaceTaskListTextPrefixes(textNode);
+            }
+        }
+    }
+
+    /**
+     * 把单个文本节点内各行行首的任务清单标记替换为图标，兼容同一节点内以换行分隔的多行；
+     * 节点内首行须确认真处于行首（见 {@link #startsLine}）——正文中间的 {@code - [ ]} 不做替换。
+     */
+    private static void replaceTaskListTextPrefixes(TextNode textNode) {
+        String text = textNode.getWholeText();
+        Matcher matcher = TASK_LIST_TEXT_LINE.matcher(text);
+        if (!matcher.find()) {
+            return;
+        }
+        StringBuilder replaced = new StringBuilder();
+        int copied = 0;
+        boolean changed = false;
+        do {
+            // 匹配从文本开头起算时（多行文本的其余行一定在换行之后），须确认前面没有同行内容
+            if (matcher.start() == 0 && !startsLine(textNode)) {
+                continue;
+            }
+            replaced.append(text, copied, matcher.start());
+            replaced.append(matcher.group(1));
+            replaced.append("x".equalsIgnoreCase(matcher.group(2)) ? TASK_CHECKED_ICON : TASK_UNCHECKED_ICON);
+            replaced.append(' ');
+            copied = matcher.end();
+            changed = true;
+        } while (matcher.find());
+        if (!changed) {
+            return;
+        }
+        replaced.append(text, copied, text.length());
+        textNode.text(replaced.toString());
+    }
+
+    /**
+     * 判断文本节点是否处于「视觉行首」（其行首的任务清单标记可被识别）：无前兄弟、前兄弟为换行
+     * {@code <br>}，或前面只有空白与无内容的包装层（如空 {@code <span>}）；注释等节点不构成行内容。
+     */
+    private static boolean startsLine(Node node) {
+        Node previous = node.previousSibling();
+        while (previous != null) {
+            if (previous instanceof TextNode text) {
+                String content = text.getWholeText();
+                if (content.contains("\n")) {
+                    return true;
+                }
+                if (!content.isBlank()) {
+                    return false;
+                }
+            } else if (previous instanceof Element element) {
+                if ("br".equalsIgnoreCase(element.tagName())) {
+                    return true;
+                }
+                if (!isVisuallyEmpty(element)) {
+                    return false;
+                }
+            }
+            previous = previous.previousSibling();
+        }
+        return true;
     }
 
     /** 判断文本节点是否位于 {@code <pre>}/{@code <code>} 内（其中的转义标签属文章示例，不能剔除）。 */
@@ -725,9 +826,9 @@ public final class WechatContentBeautifier {
             headingBorderCss(headingBorder, cfg.getH6BorderColor())));
         applyAll(body, "blockquote", blockquoteStyle(cfg.isBlockquoteBorderEnabled(), accent,
             color(cfg.getBlockquoteBgColor(), DEFAULT_BLOCKQUOTE_BG_COLOR)));
-        applyAllSkippingCodeBlocks(body, "ul", UL_STYLE);
+        applyAllSkippingEmbedded(body, "ul", UL_STYLE);
         applyAll(body, "ol", OL_STYLE);
-        applyAllSkippingCodeBlocks(body, "li", liStyle(textColor));
+        applyAllSkippingEmbedded(body, "li", liStyle(textColor));
         applyAll(body, "img", IMG_STYLE);
         applyAll(body, "table", TABLE_STYLE);
         applyAll(body, "th", TH_STYLE);
@@ -746,6 +847,9 @@ public final class WechatContentBeautifier {
                 paragraphStyle = tableCellPStyle(textColor);
             } else if (isInside(p, "blockquote")) {
                 paragraphStyle = QUOTE_P_STYLE;
+            } else if (isInsideTaskList(p)) {
+                // 任务项内段落：行高字号同正文、间距收紧（项间距由段落外边距提供，见 taskItemPStyle）
+                paragraphStyle = taskItemPStyle(textColor);
             } else {
                 paragraphStyle = pStyle(textColor);
             }
@@ -1053,6 +1157,181 @@ public final class WechatContentBeautifier {
         for (Element table : body.select("table")) {
             overrideStyle(table, "width:100%;");
         }
+    }
+
+    /**
+     * 重建两种来源的任务列表为「Emoji 图标 + 内容」：微信图文不渲染 {@code <input>} 复选框（表单元素
+     * 会被剥离），勾选状态无法呈现——已完成用 {@link #TASK_CHECKED_ICON}、未完成用
+     * {@link #TASK_UNCHECKED_ICON}，列表去掉默认圆点与缩进（见 {@link #TASK_LIST_STYLE}）。
+     *
+     * <ul>
+     *   <li><b>Halo 默认编辑器（TipTap）输出</b>：{@code <ul data-type="taskList"><li
+     *       data-checked="true" data-type="taskItem">…}，图标置于首个段落行首
+     *       （见 {@link #rebuildTaskItem}）；</li>
+     *   <li><b>markdown 渲染输出</b>（「Markdown 编辑块」等 GFM 任务列表）：{@code <li>} 内含
+     *       {@code input[type=checkbox]}，图标就地替换复选框
+     *       （见 {@link #buildMarkdownTaskLists}）。</li>
+     * </ul>
+     *
+     * <p>须在通用样式注入前执行：重建后的 {@code <ul>}/{@code <li>} 由本方法直接写入样式，注入阶段
+     * 跳过它们（见 {@link #applyAllSkippingEmbedded}）；任务项内段落由段落循环按
+     * {@link #taskItemPStyle} 处理。任务列表可嵌套，倒序遍历快照——先重建内层。</p>
+     */
+    private static void buildTaskLists(Element body, BeautifySetting cfg) {
+        String itemStyle = taskItemStyle(color(cfg.getTextColor(), DEFAULT_TEXT_COLOR));
+        List<Element> lists = body.select("ul[data-type=taskList]");
+        for (int i = lists.size() - 1; i >= 0; i--) {
+            Element list = lists.get(i);
+            // 可能已随外层任务列表重建搬运后脱离文档，跳过失效节点
+            if (list.parent() == null) {
+                continue;
+            }
+            list.attr("style", TASK_LIST_STYLE);
+            for (Element item : new ArrayList<>(list.children())) {
+                if ("li".equalsIgnoreCase(item.tagName())) {
+                    rebuildTaskItem(item, itemStyle);
+                }
+            }
+        }
+        // markdown 渲染输出的 GFM 任务列表（识别方式不同）另行重建，产物与上面完全一致
+        buildMarkdownTaskLists(body, itemStyle);
+    }
+
+    /**
+     * 重建单个任务项：移除 checkbox 标记（{@code <label>} 及其 {@code <input>}）、解包内容包装层
+     * {@code <div>}，行首拼入状态图标。{@code data-checked} 判定后即清除——状态已由图标表达，
+     * 产物不保留编辑器私有数据属性。
+     */
+    private static void rebuildTaskItem(Element item, String itemStyle) {
+        String icon = isTaskItemChecked(item) ? TASK_CHECKED_ICON : TASK_UNCHECKED_ICON;
+        item.removeAttr("data-checked");
+        item.removeAttr("data-type");
+        item.attr("style", itemStyle);
+        for (Element child : new ArrayList<>(item.children())) {
+            if ("label".equalsIgnoreCase(child.tagName())) {
+                child.remove();
+            } else if ("div".equalsIgnoreCase(child.tagName())) {
+                child.unwrap();
+            }
+        }
+        // 防御异常结构：裸在任务项下的 <input>（未经 <label> 包装）一并清除
+        item.select("input").remove();
+        // 图标置于行首：优先拼进首个段落开头（与内容同行），无段落时直接放任务项开头
+        Element target = item;
+        for (Element child : item.children()) {
+            if ("p".equalsIgnoreCase(child.tagName())) {
+                target = child;
+                break;
+            }
+        }
+        target.prependChild(new TextNode(icon + " "));
+    }
+
+    /**
+     * 判断任务项是否已完成：{@code data-checked} 存在且值不为 {@code false}（TipTap 将空串与
+     * {@code true} 均视为勾选，见编辑器 parseHTML 的兼容逻辑）。
+     */
+    private static boolean isTaskItemChecked(Element item) {
+        return isTruthyAttr(item, "data-checked");
+    }
+
+    /**
+     * 属性存在且值不为 {@code false} 即视为「真」：勾选状态的常见写法有 {@code checked=""}、
+     * {@code checked="checked"}、{@code data-checked="true"} 等，空串与同名值均表示已勾选。
+     */
+    private static boolean isTruthyAttr(Element element, String attributeName) {
+        return element.hasAttr(attributeName)
+            && !"false".equalsIgnoreCase(element.attr(attributeName).trim());
+    }
+
+    /**
+     * 重建 markdown 渲染输出的「GFM 任务列表」（如「Markdown 编辑块」的 marked 输出：
+     * {@code <ul><li><input type="checkbox" [checked]> 内容</li>…</ul>}，松散列表的复选框位于
+     * 首段 {@code <p>} 内），产物与 {@link #buildTaskLists} 的 TipTap 处理一致。
+     *
+     * <p>判定任务项只看「{@code <li>} 直接内容区（不跨越嵌套列表）内是否有
+     * {@code input[type=checkbox]}」，兼容 marked/flexmark/GitHub 复制等常见输出。含任务项的列表
+     * 整体补 {@code data-type="taskList"} 标记——让通用样式注入跳过（见
+     * {@link #applyAllSkippingEmbedded}）、任务项内段落按 {@link #taskItemPStyle} 注入；列表中混排的
+     * 普通项会随列表一并去掉圆点（罕见场景，内容不受影响）。倒序遍历快照：嵌套任务列表先重建内层。</p>
+     */
+    private static void buildMarkdownTaskLists(Element body, String itemStyle) {
+        List<Element> lists = body.select("ul, ol");
+        for (int i = lists.size() - 1; i >= 0; i--) {
+            Element list = lists.get(i);
+            // 可能已随外层任务列表重建搬运后脱离文档，跳过失效节点
+            if (list.parent() == null) {
+                continue;
+            }
+            // TipTap 任务列表（上面已重建，ul 保留 data-type="taskList" 标记）不重复处理
+            if ("taskList".equalsIgnoreCase(list.attr("data-type"))) {
+                continue;
+            }
+            List<Element> items = new ArrayList<>();
+            for (Element item : list.children()) {
+                if ("li".equalsIgnoreCase(item.tagName()) && taskItemCheckbox(item) != null) {
+                    items.add(item);
+                }
+            }
+            if (items.isEmpty()) {
+                continue;
+            }
+            list.attr("data-type", "taskList");
+            list.attr("style", TASK_LIST_STYLE);
+            for (Element item : items) {
+                rebuildMarkdownTaskItem(item, itemStyle);
+            }
+        }
+    }
+
+    /**
+     * 重建单个 markdown 任务项：把复选框<b>就地</b>替换为状态图标——紧凑列表在 {@code <li>} 行首、
+     * 松散列表在段首 {@code <p>} 内，替换后图标位置天然正确；随后写入任务项样式。
+     */
+    private static void rebuildMarkdownTaskItem(Element item, String itemStyle) {
+        Element checkbox = taskItemCheckbox(item);
+        if (checkbox == null) {
+            return;
+        }
+        String icon = isTruthyAttr(checkbox, "checked") ? TASK_CHECKED_ICON : TASK_UNCHECKED_ICON;
+        // 渲染器一般在复选框后输出一个分隔空格，此时图标直接替换即可；没有时补一个避免图标与文字黏连
+        boolean spaceFollows = startsWithInlineSpace(checkbox.nextSibling());
+        checkbox.replaceWith(new TextNode(spaceFollows ? icon : icon + " "));
+        item.attr("style", itemStyle);
+        // 防御异常结构：任务项内残留的复选框一并清除（嵌套任务列表已先行重建，不会误删其图标）
+        item.select("input[type=checkbox]").remove();
+    }
+
+    /**
+     * 取任务项「直接内容区」内的复选框：沿 input 的祖先链向上直到任务项，中途经过列表容器
+     * （{@code <ul>}/{@code <ol>}）说明该复选框属于嵌套的子列表、不是本项的状态标记；找不到
+     * 返回 {@code null}（即当前项不是任务项）。
+     */
+    private static Element taskItemCheckbox(Element item) {
+        for (Element input : item.select("input[type=checkbox]")) {
+            Element current = input.parent();
+            boolean nested = false;
+            while (current != null && current != item) {
+                if ("ul".equalsIgnoreCase(current.tagName()) || "ol".equalsIgnoreCase(current.tagName())) {
+                    nested = true;
+                    break;
+                }
+                current = current.parent();
+            }
+            if (!nested) {
+                return input;
+            }
+        }
+        return null;
+    }
+
+    /** 节点是否以行内空白（空格/制表符）开头：判断图标替换复选框后是否需要补一个分隔空格。 */
+    private static boolean startsWithInlineSpace(Node node) {
+        if (!(node instanceof TextNode textNode)) {
+            return false;
+        }
+        String text = textNode.getWholeText();
+        return !text.isEmpty() && (text.charAt(0) == ' ' || text.charAt(0) == '\t');
     }
 
     /**
@@ -1526,6 +1805,19 @@ public final class WechatContentBeautifier {
         return "margin:0.35em 0;line-height:1.75;font-size:16px;color:" + textColor + ";";
     }
 
+    /**
+     * 任务项样式：不带外边距（项间距由任务项内段落的上下外边距提供，见 {@link #taskItemPStyle}）；
+     * {@code list-style:none} 兜底去掉圆点，行首标记即状态图标。
+     */
+    private static String taskItemStyle(String textColor) {
+        return "line-height:1.75;font-size:16px;color:" + textColor + ";list-style:none;";
+    }
+
+    /** 任务项内段落：行高字号同正文，间距收紧（各项之间与多段任务项的段间间距一致）。 */
+    private static String taskItemPStyle(String textColor) {
+        return "margin:0.25em 0;line-height:1.75;font-size:16px;color:" + textColor + ";";
+    }
+
     /** 单元格：与 {@link #TH_STYLE} 同款微信原生观感——浅灰细边框、紧凑内边距、左对齐。 */
     private static String tdStyle(String textColor) {
         return "border:1px solid #e6e6e6;padding:8px;text-align:left;color:" + textColor + ";" + CELL_WRAP;
@@ -1571,6 +1863,18 @@ public final class WechatContentBeautifier {
     }
 
     /**
+     * 同 {@link #applyAll}，但跳过「由本类重建、样式已精确写入」的结构：微信原生代码块（行号列与
+     * 代码行由微信样式接管）与任务列表（{@link #buildTaskLists} 已写入列表/任务项样式）。
+     */
+    private static void applyAllSkippingEmbedded(Element body, String cssQuery, String style) {
+        for (Element element : body.select(cssQuery)) {
+            if (!isInsideWechatCodeBlock(element) && !isInsideTaskList(element)) {
+                applyStyle(element, style);
+            }
+        }
+    }
+
+    /**
      * 组合样式：默认样式在前、元素原有内联样式在后，保证用户已设置的行内样式优先生效。
      */
     private static void applyStyle(Element element, String style) {
@@ -1601,6 +1905,22 @@ public final class WechatContentBeautifier {
         while (current != null) {
             if (current.hasClass(CODE_SNIPPET_FIX_CLASS) || current.hasClass(CODE_SNIPPET_CLASS)) {
                 return true;
+            }
+            current = current.parent();
+        }
+        return false;
+    }
+
+    /**
+     * 判断元素是否位于任务列表结构内：向上（含自身）找到的<b>第一个</b>列表容器是任务列表
+     * （{@code ul} 带 {@code data-type="taskList"}）即视为在任务列表内——任务项内容里更深层嵌套的
+     * 普通列表（无该标记）不在此列，恢复常规样式注入。
+     */
+    private static boolean isInsideTaskList(Element element) {
+        Element current = element;
+        while (current != null) {
+            if ("ul".equalsIgnoreCase(current.tagName()) || "ol".equalsIgnoreCase(current.tagName())) {
+                return "taskList".equalsIgnoreCase(current.attr("data-type"));
             }
             current = current.parent();
         }
