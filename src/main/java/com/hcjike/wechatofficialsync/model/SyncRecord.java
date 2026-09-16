@@ -4,7 +4,8 @@ import java.time.Instant;
 import lombok.Data;
 
 /**
- * 单篇文章的同步状态记录，持久化在插件专用的 ConfigMap 中，供文章列表展示。
+ * 单篇文章的同步状态视图（状态码、说明、时间与草稿 media_id），供 Console 文章列表展示与
+ * 接口下发的传输对象。持久化由 {@link WechatSyncTask} 任务记录承担，本类型仅作为对外投影。
  *
  * @author hcjike
  * @since 1.0.0
