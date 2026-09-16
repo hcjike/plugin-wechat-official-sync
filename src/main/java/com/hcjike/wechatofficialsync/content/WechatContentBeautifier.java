@@ -26,6 +26,9 @@ import tools.jackson.databind.json.JsonMapper;
  * {@code class}/{@code id} 属性，<b>只保留元素上的内联 {@code style="..."} 属性</b>。而 Halo 正文靠主题
  * class + 外部 CSS 排版，直接塞进草稿会丢样式变成「裸 HTML」。本类按<b>标签名</b>为常见元素注入内联样式
  * （标题/段落/引用/代码块/图片自适应/列表/任务列表/表格/链接等），对标 doocs/md 的默认排版效果。</p>
+ *
+ * <p>微信图文还会过滤 {@code <video>}/{@code <audio>} 标签（草稿接口不支持正文内嵌媒体，直接同步会渲染
+ * 成空白块），编辑器插入的视频与音频会重建为提示卡片，见 {@link #buildMediaCards}。</p>
 
  * <p>注入策略：我们的默认样式写在<b>前</b>、元素原有内联样式写在<b>后</b>。同一 {@code style} 属性内后出现的
  * 同名属性覆盖先出现的，故用户在编辑器里已设置的行内样式优先级更高，本类只补齐缺省样式，不覆盖用户意图。
@@ -83,6 +86,18 @@ public final class WechatContentBeautifier {
 
     /** 未配置或非法时使用的内置默认折叠块边框颜色（浅灰，与表格边框同色）。 */
     private static final String DEFAULT_DETAILS_BORDER_COLOR = "#e6e6e6";
+
+    /** 未配置或非法时使用的内置默认视频/音频提示卡片背景色（浅灰，与引用块背景一致）。 */
+    private static final String DEFAULT_MEDIA_CARD_BG_COLOR = "#f7f7f7";
+
+    /** 未配置或非法时使用的内置默认视频/音频提示卡片主行文字颜色。 */
+    private static final String DEFAULT_MEDIA_TITLE_COLOR = "#333333";
+
+    /** 未配置或非法时使用的内置默认视频/音频提示卡片引导语文字颜色。 */
+    private static final String DEFAULT_MEDIA_HINT_COLOR = "#999999";
+
+    /** 未配置或非法时使用的内置默认视频/音频提示卡片标记符号颜色（微信绿）。 */
+    private static final String DEFAULT_MEDIA_MARKER_COLOR = "#07c160";
 
     /** H1–H6 未配置或非法时的内置默认文字颜色（下标 0 对应 H1）。 */
     private static final String[] DEFAULT_HEADING_COLORS =
@@ -175,6 +190,28 @@ public final class WechatContentBeautifier {
 
     /** 任务列表未完成项的行首图标。 */
     private static final String TASK_UNCHECKED_ICON = "⬜";
+
+    /**
+     * 媒体提示卡片的视频标记符号：微信图文会过滤 {@code <video>}/{@code <audio>} 标签（草稿接口不支持
+     * 正文内嵌媒体，外链视频也无法引用为微信素材），直接同步会渲染成空白块，故统一重建为
+     * 「标记 + 引导语」卡片（见 {@link #buildMediaCards}）。
+     */
+    private static final String VIDEO_MARKER = "▶";
+
+    /** 音频卡片的标记符号。 */
+    private static final String AUDIO_MARKER = "♪";
+
+    /** 视频卡片主行标签。 */
+    private static final String VIDEO_LABEL = "视频";
+
+    /** 音频卡片主行标签。 */
+    private static final String AUDIO_LABEL = "音频";
+
+    /** 视频卡片引导语：公众号正文外链不可点击，「阅读原文」是唯一可靠入口。 */
+    private static final String VIDEO_HINT = "请点击文末「阅读原文」观看";
+
+    /** 音频卡片引导语。 */
+    private static final String AUDIO_HINT = "请点击文末「阅读原文」收听";
 
     /** 任务列表容器样式：去掉列表默认圆点与缩进（行首标记即 Emoji 图标），上下外边距对齐正文列表。 */
     private static final String TASK_LIST_STYLE = "margin:0.9em 0;padding-left:0;list-style:none;";
@@ -310,6 +347,10 @@ public final class WechatContentBeautifier {
         if (isTableWidthFill(cfg)) {
             applyTableFillWidth(body);
         }
+        // 微信图文会过滤 <video>/<audio> 标签（视频与音频无法在正文中播放），直接同步会渲染成空白；
+        // 重建为「标记 + 引导语」的提示卡片。须在样式注入后执行：卡片样式由本步精确写入、不参与
+        // 通用注入，产物随后续分栏/画廊/折叠块等重建原样搬运
+        buildMediaCards(body, cfg);
         wrapWithBase(body, cfg);
         // 分栏卡片与画廊按各自配置重建版式（表格/独占一行）：微信会过滤 display:grid、flex 支持不稳定，
         // 直接同步会导致各列/各图纵向堆叠；置于最后也让布局表格避开通用 table/td 样式注入与滚动容器包裹
@@ -616,6 +657,132 @@ public final class WechatContentBeautifier {
             paragraph.appendChild(child);
         }
         element.replaceWith(paragraph);
+    }
+
+    /**
+     * 重建微信无法渲染的媒体块为提示卡片：微信图文会过滤 {@code <video>}/{@code <audio>} 标签
+     * （草稿接口不支持正文内嵌视频与音频，直接同步会渲染成空白块），故把编辑器插入的媒体重建为
+     * 「标记 + 引导语」卡片：主行是标记 {@link #VIDEO_MARKER} {@link #AUDIO_MARKER}
+     * + 加粗标签，编辑器中填写的媒体描述（{@code <figcaption>}）随卡片保留，末行引导读者点击
+     * 文末「阅读原文」查看——公众号正文的外链不可点击，「阅读原文」是唯一可靠入口。
+     *
+     * <p>卡片样式（背景、主行文字、引导语、标记符号四项颜色）来自配置，各自解析一次、非法值
+     * 回退内置默认，本页所有卡片共用同一组样式（见 {@link #mediaCardStyle} 等）。须在样式注入后
+     * 执行：卡片样式由本步精确写入、不参与通用段落样式注入；产物是标准 {@code <section>} 结构，
+     * 随后续分栏/画廊/折叠块重建原样搬运。倒序遍历快照：媒体与正文文字混排在同一段落时，卡片
+     * 依次插到该段落之后，倒序处理才能保持原有先后顺序。</p>
+     */
+    private static void buildMediaCards(Element body, BeautifySetting cfg) {
+        // 四项颜色各自解析一次（合法十六进制，非法回退内置默认），本页所有卡片共用同一组样式
+        MediaCardStyles styles = new MediaCardStyles(
+            mediaCardStyle(color(cfg.getMediaCardBgColor(), DEFAULT_MEDIA_CARD_BG_COLOR)),
+            mediaTitleStyle(color(cfg.getMediaCardTitleColor(), DEFAULT_MEDIA_TITLE_COLOR)),
+            mediaHintStyle(color(cfg.getMediaCardHintColor(), DEFAULT_MEDIA_HINT_COLOR)),
+            color(cfg.getMediaCardMarkerColor(), DEFAULT_MEDIA_MARKER_COLOR));
+        List<Element> media = new ArrayList<>(body.select("video, audio"));
+        for (int i = media.size() - 1; i >= 0; i--) {
+            Element element = media.get(i);
+            // 可能已随同段落中的其他媒体转换而脱离文档，跳过失效节点
+            if (element.parent() == null) {
+                continue;
+            }
+            convertMediaElement(element, styles);
+        }
+    }
+
+    /** 视频/音频提示卡片的一组样式（四项颜色已解析、非法值已回退），本页所有卡片共用。 */
+    private record MediaCardStyles(String card, String title, String hint, String marker) {
+    }
+
+    /**
+     * 转换单个媒体元素：把 {@code <video>}/{@code <audio>} 替换为提示卡片。
+     *
+     * <p>媒体通常被 Halo 的 {@code <figure>} 包装（先由 {@link #normalizeBlockWrappers} 降级为标准
+     * {@code <p>}），直接替换元素会产出 {@code <p><section>…</section></p>} 的非法嵌套（微信编辑器
+     * 重新解析结构时可能引入多余空行）：段落中仅有媒体与描述时整段替换为卡片；与正文文字混排时
+     * 卡片移到段落之后（保持块级结构合法）。其他位置（{@code <div>}/{@code <td>}/{@code <li>} 等）
+     * 直接替换即可——这些容器本就允许块级内容。</p>
+     */
+    private static void convertMediaElement(Element media, MediaCardStyles styles) {
+        Element caption = siblingFigureCaption(media);
+        Element card = buildMediaCard(media.tagName(), caption, styles);
+        Element parent = media.parent();
+        if (parent != null && "p".equalsIgnoreCase(parent.tagName())) {
+            if (isMediaOnlyParagraph(parent, media, caption)) {
+                parent.replaceWith(card);
+                return;
+            }
+            // 与正文文字混排：卡片移到段落之后，段落内的媒体元素一并清除
+            parent.after(card);
+            media.remove();
+            return;
+        }
+        media.replaceWith(card);
+    }
+
+    /** 取媒体元素同父的媒体描述（Halo figure 包装里的 {@code <figcaption>}）；无则返回 {@code null}。 */
+    private static Element siblingFigureCaption(Element media) {
+        Element parent = media.parent();
+        if (parent == null) {
+            return null;
+        }
+        for (Element child : parent.children()) {
+            if ("figcaption".equalsIgnoreCase(child.tagName())) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 构建媒体提示卡片：主行（标记 + 标签）→ 媒体描述（若有）→ 引导语（指向「阅读原文」）。
+     * 描述 {@code <figcaption>} 已在样式注入阶段带上居中灰字样式，搬入后观感与正文一致。
+     */
+    private static Element buildMediaCard(String tagName, Element caption, MediaCardStyles styles) {
+        boolean isVideo = "video".equalsIgnoreCase(tagName);
+        Element card = new Element(Tag.valueOf("section"), "");
+        card.attr("style", styles.card());
+        card.appendChild(buildMediaTitle(isVideo, styles));
+        if (caption != null) {
+            card.appendChild(caption);
+        }
+        Element hint = new Element(Tag.valueOf("p"), "");
+        hint.attr("style", styles.hint());
+        hint.text(isVideo ? VIDEO_HINT : AUDIO_HINT);
+        card.appendChild(hint);
+        return card;
+    }
+
+    /** 媒体卡片主行：可配置标记色（{@code ▶}/{@code ♪}）+ 加粗标签（{@code 视频}/{@code 音频}）。 */
+    private static Element buildMediaTitle(boolean isVideo, MediaCardStyles styles) {
+        Element title = new Element(Tag.valueOf("p"), "");
+        title.attr("style", styles.title());
+        Element marker = new Element(Tag.valueOf("span"), "");
+        marker.attr("style", "color:" + styles.marker() + ";");
+        marker.text(isVideo ? VIDEO_MARKER : AUDIO_MARKER);
+        title.appendChild(marker);
+        title.appendChild(new TextNode(" " + (isVideo ? VIDEO_LABEL : AUDIO_LABEL)));
+        return title;
+    }
+
+    /**
+     * 段落是否仅由媒体与描述构成（可整段替换为卡片）：除目标媒体、媒体描述、空白文本与换行
+     * {@code <br>} 外无其他内容。
+     */
+    private static boolean isMediaOnlyParagraph(Element paragraph, Element media, Element caption) {
+        for (Node child : paragraph.childNodes()) {
+            if (child == media || child == caption) {
+                continue;
+            }
+            if (child instanceof TextNode text && hasNoVisibleText(text.getWholeText())) {
+                continue;
+            }
+            if (child instanceof Element element && "br".equalsIgnoreCase(element.tagName())) {
+                continue;
+            }
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1778,6 +1945,23 @@ public final class WechatContentBeautifier {
      */
     private static String detailsContentStyle(String contentBgColor) {
         return "padding:2px 14px;background:" + contentBgColor + ";";
+    }
+
+    /**
+     * 视频/音频提示卡片样式：背景色可配 + 圆角居中（默认浅灰底与引用块底色一致，观感统一）。
+     */
+    private static String mediaCardStyle(String bgColor) {
+        return "margin:1em 0;padding:14px 16px;background:" + bgColor + ";border-radius:6px;text-align:center;";
+    }
+
+    /** 视频/音频提示卡片主行样式：加粗 + 文字颜色可配（默认深色）。 */
+    private static String mediaTitleStyle(String titleColor) {
+        return "margin:0;font-size:15px;font-weight:bold;line-height:1.6;color:" + titleColor + ";";
+    }
+
+    /** 视频/音频提示卡片引导语样式：小号 + 文字颜色可配（默认浅灰）。 */
+    private static String mediaHintStyle(String hintColor) {
+        return "margin:4px 0 0;font-size:13px;line-height:1.6;color:" + hintColor + ";";
     }
 
     /** 正文根节点基础排版：字体、字号、行高与可配置正文色，供未显式覆盖的后代继承。 */

@@ -96,6 +96,21 @@ public class BeautifySetting {
     private String detailsBorderColor = "#e6e6e6";
 
     /**
+     * 视频/音频提示卡片（微信不支持正文内嵌视频与音乐，编辑器插入的 {@code <video>}/{@code <audio>}
+     * 同步时会重建为该卡片）的背景颜色。默认浅灰（与引用块背景一致）。
+     */
+    private String mediaCardBgColor = "#f7f7f7";
+
+    /** 视频/音频提示卡片主行文字颜色（「▶ 视频」/「♪ 音频」）。默认深灰。 */
+    private String mediaCardTitleColor = "#333333";
+
+    /** 视频/音频提示卡片引导语文字颜色（「请点击文末『阅读原文』观看/收听」）。默认浅灰。 */
+    private String mediaCardHintColor = "#999999";
+
+    /** 视频/音频提示卡片标记符号颜色（▶ / ♪）。默认微信绿。 */
+    private String mediaCardMarkerColor = "#07c160";
+
+    /**
      * 分栏卡片的同步版式：{@link #LAYOUT_STYLE_TABLE}（默认，重建为表格、各列并排）或
      * {@link #LAYOUT_STYLE_STACKED}（独占一行——每栏一行，栏内内容照常保留）。取值非法时按表格处理。
      */

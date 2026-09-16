@@ -187,6 +187,30 @@ spec:
           help: 折叠块卡片的边框与标题栏分隔线颜色
           value: "#e6e6e6"
           validation: required
+        - $formkit: color
+          name: mediaCardBgColor
+          label: 视频/音频卡片背景色
+          help: 微信不支持正文内嵌视频与音乐，编辑器插入的视频、音频同步时会重建为提示卡片（▶ 视频 / ♪ 音频 +「阅读原文」引导语）；此项控制卡片背景色
+          value: "#f7f7f7"
+          validation: required
+        - $formkit: color
+          name: mediaCardTitleColor
+          label: 视频/音频卡片主行颜色
+          help: 提示卡片主行「▶ 视频」/「♪ 音频」的文字颜色
+          value: "#333333"
+          validation: required
+        - $formkit: color
+          name: mediaCardHintColor
+          label: 视频/音频卡片引导语颜色
+          help: 提示卡片引导语「请点击文末『阅读原文』观看/收听」的文字颜色
+          value: "#999999"
+          validation: required
+        - $formkit: color
+          name: mediaCardMarkerColor
+          label: 视频/音频卡片标记颜色
+          help: 提示卡片标记符号「▶」/「♪」的颜色
+          value: "#07c160"
+          validation: required
         - $formkit: select
           name: tableWidthMode
           id: tableWidthMode
