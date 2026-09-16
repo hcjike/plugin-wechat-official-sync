@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import run.halo.app.extension.ConfigMap;
+import run.halo.app.extension.ExtensionOperator;
 import run.halo.app.extension.ListOptions;
 import run.halo.app.extension.Metadata;
 import run.halo.app.extension.ReactiveExtensionClient;
@@ -166,6 +167,29 @@ public class WechatSyncTaskStore {
                 log.warn("保存文章 [{}] 的同步结果失败：{}", postName, e.getMessage());
                 return Mono.empty();
             });
+    }
+
+    /**
+     * 删除文章对应的同步任务记录：文章在 Halo 中被永久删除后其同步记录已无意义，一并清理，
+     * 避免状态投影（{@link #findStatusMap()}）里残留指向已不存在文章的记录。幂等且容错：
+     * 任务不存在、或已被标记删除（Halo 调谐循环会在一次永久删除中多次发布 {@code PostDeletedEvent}）
+     * 时均为无操作，删除失败仅记日志、不向调用方抛出异常。
+     */
+    public Mono<Void> delete(String postName) {
+        return client.fetch(WechatSyncTask.class, taskName(postName))
+            .flatMap(task -> {
+                if (ExtensionOperator.isDeleted(task)) {
+                    // 已标记删除（上一次事件已触发清理，等待 GcReconciler 真正移除）：跳过，避免重复删除与日志
+                    return Mono.empty();
+                }
+                return client.delete(task)
+                    .doOnNext(deleted -> log.info("文章 [{}] 已被永久删除，清理其同步记录", postName));
+            })
+            .onErrorResume(e -> {
+                log.warn("清理文章 [{}] 的同步记录失败：{}", postName, e.getMessage());
+                return Mono.empty();
+            })
+            .then();
     }
 
     /**
