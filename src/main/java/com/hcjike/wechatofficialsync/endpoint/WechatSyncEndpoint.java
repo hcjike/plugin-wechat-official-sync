@@ -4,8 +4,10 @@ import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
 import com.hcjike.wechatofficialsync.model.SyncRecord;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
-import com.hcjike.wechatofficialsync.service.WechatSyncRecordStore;
+import com.hcjike.wechatofficialsync.model.WechatSyncTask;
 import com.hcjike.wechatofficialsync.service.WechatSyncService;
+import com.hcjike.wechatofficialsync.service.WechatSyncTaskRunner;
+import com.hcjike.wechatofficialsync.service.WechatSyncTaskStore;
 import java.util.List;
 import java.util.Map;
 import org.slf4j.Logger;
@@ -17,7 +19,6 @@ import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import reactor.core.publisher.Mono;
-import reactor.core.scheduler.Schedulers;
 import run.halo.app.core.extension.endpoint.CustomEndpoint;
 import run.halo.app.extension.GroupVersion;
 import run.halo.app.plugin.ReactiveSettingFetcher;
@@ -28,8 +29,10 @@ import run.halo.app.plugin.ReactiveSettingFetcher;
  * {@code POST /apis/api.wechat-sync.halo.run/v1alpha1/validate}（同步前预检）与
  * {@code POST /apis/api.wechat-sync.halo.run/v1alpha1/preview}（预览美化效果与草稿元信息）。
  *
- * <p>提交同步的请求立即返回 {@code 202 Accepted}，实际同步在后台异步执行；预检与预览均同步返回，
- * 不提交任何任务、不写同步记录。</p>
+ * <p>提交同步时先把任务（含输入快照）持久化为 {@link WechatSyncTask} 自定义模型（保存在 Halo 数据库），
+ * 接口立即返回 {@code 202 Accepted}，实际同步在后台异步执行；插件（或 Halo 服务）重启后，
+ * 未完成的任务由 {@link WechatSyncTaskRunner} 自动重放恢复。预检与预览均同步返回，
+ * 不提交任何任务、不写任务记录。</p>
  *
  * @author hcjike
  * @since 1.0.0
@@ -43,13 +46,16 @@ public class WechatSyncEndpoint implements CustomEndpoint {
 
     private final WechatSyncService syncService;
 
-    private final WechatSyncRecordStore recordStore;
+    private final WechatSyncTaskStore taskStore;
+
+    private final WechatSyncTaskRunner taskRunner;
 
     public WechatSyncEndpoint(ReactiveSettingFetcher settingFetcher, WechatSyncService syncService,
-        WechatSyncRecordStore recordStore) {
+        WechatSyncTaskStore taskStore, WechatSyncTaskRunner taskRunner) {
         this.settingFetcher = settingFetcher;
         this.syncService = syncService;
-        this.recordStore = recordStore;
+        this.taskStore = taskStore;
+        this.taskRunner = taskRunner;
     }
 
     @Override
@@ -69,7 +75,7 @@ public class WechatSyncEndpoint implements CustomEndpoint {
                 log.info("收到同步请求：文章《{}》，postName={}", body.getTitle(), postName);
                 // 同一文章已有进行中的同步任务时拒绝重复提交（409）：
                 // 避免重复上传素材、重复建草稿，以及两个任务的状态互相覆盖
-                return recordStore.findAll()
+                return taskStore.findStatusMap()
                     .flatMap(records -> {
                         if (isSyncing(records, postName)) {
                             log.info("文章《{}》正在同步中，忽略本次重复提交", body.getTitle());
@@ -82,25 +88,22 @@ public class WechatSyncEndpoint implements CustomEndpoint {
     }
 
     /**
-     * 通过重复提交检查后的提交流程：先落库「同步中」，再异步执行，接口立即返回。
+     * 通过重复提交检查后的提交流程：先把任务（含输入快照）落库为「同步中」，再异步执行，接口立即返回。
+     * 任务持久化在 Halo 数据库中，插件（或 Halo 服务）重启后由执行器自动重放恢复。
      */
     private Mono<ServerResponse> doSync(SyncRequest body, String postName) {
         return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
-            .flatMap(setting -> settingFetcher
-                .fetch(BeautifySetting.GROUP, BeautifySetting.class)
-                // 未配置「正文美化」分组时用内置默认值，保证美化不中断
-                .defaultIfEmpty(new BeautifySetting())
-                .flatMap(beautify -> recordStore.save(postName, SyncRecord.pending())
-                    // 先落库「同步中」，再异步执行，接口立即返回，不阻塞 Console 请求
-                    .then(Mono.fromRunnable(() -> startAsync(body, setting, beautify)))
-                    .then(ServerResponse.accepted()
-                        .bodyValue(Map.of(
-                            "message", "同步任务已提交",
-                            "postName", postName)))))
+            .flatMap(setting -> taskStore.savePending(postName, body)
+                // 先落库任务（含输入快照），再异步执行，接口立即返回，不阻塞 Console 请求
+                .then(Mono.fromRunnable(() -> taskRunner.start(postName, body)))
+                .then(ServerResponse.accepted()
+                    .bodyValue(Map.of(
+                        "message", "同步任务已提交",
+                        "postName", postName))))
             .switchIfEmpty(Mono.defer(() -> {
                 log.warn("文章《{}》同步被拒绝：插件尚未配置微信公众号信息", body.getTitle());
-                return recordStore
-                    .save(postName, SyncRecord.failed("插件尚未配置微信公众号信息"))
+                return taskStore
+                    .saveFailed(postName, "插件尚未配置微信公众号信息")
                     .then(ServerResponse.badRequest()
                         .bodyValue(Map.of(
                             "message", "请先在插件设置中配置 AppID / AppSecret")));
@@ -112,12 +115,12 @@ public class WechatSyncEndpoint implements CustomEndpoint {
      * （微信配置缺失 AppID / AppSecret、封面图缺失或无法解析、该文章正在同步中）的汇总，
      * 空数组表示校验通过、可继续进入预览 / 同步流程。
      *
-     * <p>不调用微信接口、不写同步记录（校验规则见 {@link WechatSyncService#validate}）；
+     * <p>不调用微信接口、不写任务记录（校验规则见 {@link WechatSyncService#validate}）；
      * Console 在点击「同步到微信公众号」时先调用本接口，有问题直接提示并中止后续流程。</p>
      */
     private Mono<ServerResponse> validate(ServerRequest request) {
         return request.bodyToMono(SyncRequest.class)
-            .flatMap(body -> recordStore.findAll()
+            .flatMap(body -> taskStore.findStatusMap()
                 .flatMap(records -> {
                     if (isSyncing(records, body.getPostName())) {
                         return okErrors(List.of("该文章正在同步中，请等待完成后再试"));
@@ -145,7 +148,7 @@ public class WechatSyncEndpoint implements CustomEndpoint {
      * （作者、原文链接、留言设置），供 Console 在确认同步前展示。
      *
      * <p>按与同步流程一致的规则解析（见 {@link WechatSyncService#preview}）：不校验公众号凭据、
-     * 不调用微信接口、不写同步记录；未配置公众号信息时也允许预览（作者回退文章作者、
+     * 不调用微信接口、不写任务记录；未配置公众号信息时也允许预览（作者回退文章作者、
      * 留言按关闭展示），保证预览路径不被配置缺失阻断。</p>
      */
     private Mono<ServerResponse> preview(ServerRequest request) {
@@ -161,29 +164,11 @@ public class WechatSyncEndpoint implements CustomEndpoint {
     }
 
     /**
-     * 返回全部文章的同步状态记录，键为文章 name，供 Console 列表渲染状态图标。
+     * 返回全部文章的同步状态，键为文章 name（由同步任务记录投影），供 Console 列表渲染状态图标。
      */
     private Mono<ServerResponse> status(ServerRequest request) {
-        return recordStore.findAll()
+        return taskStore.findStatusMap()
             .flatMap(records -> ServerResponse.ok().bodyValue(records));
-    }
-
-    /**
-     * 在后台线程执行同步，并将最终结果（成功/失败）写回状态存储。
-     */
-    private void startAsync(SyncRequest body, WechatSetting setting, BeautifySetting beautify) {
-        String postName = body.getPostName() == null ? "" : body.getPostName();
-        syncService.submit(body, setting, beautify)
-            .subscribeOn(Schedulers.boundedElastic())
-            .subscribe(
-                mediaId -> {
-                    log.info("文章《{}》已同步到公众号草稿箱，media_id={}", body.getTitle(), mediaId);
-                    recordStore.save(postName, SyncRecord.success(mediaId)).subscribe();
-                },
-                error -> {
-                    log.error("文章《{}》同步到公众号失败：{}", body.getTitle(), error.getMessage(), error);
-                    recordStore.save(postName, SyncRecord.failed(error.getMessage())).subscribe();
-                });
     }
 
     @Override
