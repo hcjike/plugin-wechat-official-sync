@@ -301,6 +301,58 @@ class WechatSyncTaskStoreTest {
     }
 
     @Test
+    void deleteRemovesTaskByPostName() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_SUCCESS, 1);
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+        when(client.delete(eq(existing))).thenReturn(Mono.just(existing));
+
+        new WechatSyncTaskStore(client).delete("post-a").block();
+
+        verify(client).delete(existing);
+    }
+
+    @Test
+    void deleteSkipsWhenAlreadyMarkedDeleted() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_SUCCESS, 1);
+        // 上一次 PostDeletedEvent 已触发删除：deletionTimestamp 已设置、等待 GcReconciler 真正移除
+        existing.getMetadata().setDeletionTimestamp(java.time.Instant.now());
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+
+        new WechatSyncTaskStore(client).delete("post-a").block();
+
+        // 重复事件不再次删除（幂等），避免重复日志
+        verify(client, never()).delete(any(WechatSyncTask.class));
+    }
+
+    @Test
+    void deleteIsNoOpWhenTaskAbsent() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(WechatSyncTask.class), anyString())).thenReturn(Mono.empty());
+
+        new WechatSyncTaskStore(client).delete("post-x").block();
+
+        verify(client, never()).delete(any(WechatSyncTask.class));
+    }
+
+    @Test
+    void deleteToleratesFailure() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_SUCCESS, 1);
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+        when(client.delete(eq(existing))).thenReturn(Mono.error(new IllegalStateException("db down")));
+
+        // 删除失败不抛出：避免影响 Halo 的文章删除主流程
+        new WechatSyncTaskStore(client).delete("post-a").block();
+
+        verify(client).delete(existing);
+    }
+
+    @Test
     void taskNameNormalizesPostName() {
         assertThat(WechatSyncTaskStore.taskName("Post-A")).isEqualTo("wechat-sync-post-a");
         assertThat(WechatSyncTaskStore.taskName("")).isEqualTo("wechat-sync-unknown");
