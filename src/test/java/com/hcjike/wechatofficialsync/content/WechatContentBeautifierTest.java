@@ -1458,4 +1458,100 @@ class WechatContentBeautifierTest {
         assertThat(result).contains("list-style:disc");
         assertThat(result).contains("list-style:none");
     }
+
+    @Test
+    void videoFigureIsRebuiltAsMediaCard() {
+        // Halo 编辑器的视频（figure 包装 + 可选描述）：微信图文会过滤 <video> 标签（草稿接口不支持
+        // 正文内嵌媒体，直接同步会渲染成空白块），须重建为「▶ 视频 + 引导语」的提示卡片
+        String html = "<figure><video src=\"https://example.com/demo.mp4\" width=\"100%\""
+            + " height=\"auto\" controls></video><figcaption>演示视频</figcaption></figure>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<video");
+        assertThat(result).contains("<section style=\"margin:1em 0;padding:14px 16px;background:#f7f7f7;");
+        assertThat(result).contains("<span style=\"color:#07c160;\">▶</span> 视频");
+        assertThat(result).contains("请点击文末「阅读原文」观看");
+        // 描述随卡片保留（带 figcaption 居中灰字样式），位于主行与引导语之间
+        assertThat(result).contains("font-style:italic;margin-top:6px;\">演示视频</figcaption>");
+        assertThat(result.indexOf("演示视频")).isGreaterThan(result.indexOf("视频</p>"));
+        assertThat(result.indexOf("演示视频")).isLessThan(result.indexOf("请点击文末「阅读原文」观看"));
+        // 卡片为两段结构（主行 + 引导语），figure 降级产生的段落被整段替换、不残留空段落
+        assertThat(result.split("<p ", -1).length - 1).isEqualTo(2);
+    }
+
+    @Test
+    void audioIsRebuiltAsMediaCard() {
+        // Halo 编辑器的音频（audio 节点）：微信同样不支持 <audio> 标签，重建为「♪ 音频」提示卡片
+        String html = "<audio src=\"https://example.com/demo.mp3\" controls preload=\"metadata\"></audio>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<audio");
+        assertThat(result).contains("<span style=\"color:#07c160;\">♪</span> 音频");
+        assertThat(result).contains("请点击文末「阅读原文」收听");
+        assertThat(result).doesNotContain("请点击文末「阅读原文」观看");
+    }
+
+    @Test
+    void mediaCardMarkerUsesConfiguredColor() {
+        // 卡片标记符号颜色独立可配（不再跟随主题色）
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setMediaCardMarkerColor("#123456");
+        String result = WechatContentBeautifier.beautify(
+            "<video src=\"https://example.com/demo.mp4\"></video>", cfg);
+
+        assertThat(result).contains("<span style=\"color:#123456;\">▶</span> 视频");
+    }
+
+    @Test
+    void mediaCardColorsAreConfigurable() {
+        // 视频/音频卡片的四项配色（背景、主行文字、引导语、标记符号）均可在「正文美化」中独立配置
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setMediaCardBgColor("#101010");
+        cfg.setMediaCardTitleColor("#202020");
+        cfg.setMediaCardHintColor("#303030");
+        cfg.setMediaCardMarkerColor("#404040");
+        String result = WechatContentBeautifier.beautify(
+            "<audio src=\"https://example.com/demo.mp3\"></audio>", cfg);
+
+        assertThat(result).contains("<section style=\"margin:1em 0;padding:14px 16px;background:#101010;");
+        assertThat(result).contains(
+            "<p style=\"margin:0;font-size:15px;font-weight:bold;line-height:1.6;color:#202020;\">");
+        assertThat(result).contains(
+            "<p style=\"margin:4px 0 0;font-size:13px;line-height:1.6;color:#303030;\">");
+        assertThat(result).contains("<span style=\"color:#404040;\">♪</span> 音频");
+    }
+
+    @Test
+    void mediaCardColorsFallBackToDefaults() {
+        // 非法颜色值（非十六进制）回退内置默认：浅灰底、深色主行、浅灰引导语、微信绿标记
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setMediaCardBgColor("red");
+        cfg.setMediaCardTitleColor("black");
+        cfg.setMediaCardHintColor("gray");
+        cfg.setMediaCardMarkerColor("blue");
+        String result = WechatContentBeautifier.beautify(
+            "<video src=\"https://example.com/demo.mp4\"></video>", cfg);
+
+        assertThat(result).contains("<section style=\"margin:1em 0;padding:14px 16px;background:#f7f7f7;");
+        assertThat(result).contains(
+            "<p style=\"margin:0;font-size:15px;font-weight:bold;line-height:1.6;color:#333333;\">");
+        assertThat(result).contains(
+            "<p style=\"margin:4px 0 0;font-size:13px;line-height:1.6;color:#999999;\">");
+        assertThat(result).contains("<span style=\"color:#07c160;\">▶</span> 视频");
+    }
+
+    @Test
+    void mediaMixedWithTextMovesCardAfterParagraph() {
+        // 媒体与正文文字混排在同一段落：卡片移到段落之后（避免 <p><section> 非法嵌套），段落文字保留；
+        // 同一段落里的多个媒体按原文顺序生成卡片（video 在前、audio 在后）
+        String html = "<p>下面演示：<video src=\"v.mp4\"></video><audio src=\"a.mp3\"></audio>结束</p>";
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<video");
+        assertThat(result).doesNotContain("<audio");
+        assertThat(result).contains("下面演示：结束");
+        // 卡片不嵌在段落内：首个卡片出现在段落闭合之后
+        assertThat(result.indexOf(">下面演示：结束</p>")).isLessThan(result.indexOf("▶"));
+        assertThat(result.indexOf("▶")).isLessThan(result.indexOf("♪"));
+    }
 }
