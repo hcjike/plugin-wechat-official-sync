@@ -312,8 +312,14 @@ public class WechatMpClient {
      */
     private NormalizedImage normalizeImage(byte[] data, String filename) {
         String ext = extensionOf(filename);
-        if (WECHAT_IMAGE_EXTS.contains(ext)) {
+        // 扩展名不可信：站点若做过批量 WebP 转换却保留原扩展名（xxx.png 里实为 WebP 字节），
+        // 仅凭后缀放行会把 WebP 原始字节直传素材接口，微信返回 errcode=40113 unsupported file type。
+        // 故改为「后缀 + 真实字节」双判定，WebP 仍走下方解码转码路径。
+        if (WECHAT_IMAGE_EXTS.contains(ext) && !looksLikeWebp(data)) {
             return new NormalizedImage(data, filename, imageMime(ext));
+        }
+        if (looksLikeWebp(data)) {
+            log.info("图片 [{}] 后缀为 {} 但真实格式是 WebP，将转码后上传以适配微信素材要求", filename, ext);
         }
         try {
             BufferedImage image = decodeImage(data);
