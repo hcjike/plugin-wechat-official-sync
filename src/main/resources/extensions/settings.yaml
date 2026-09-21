@@ -63,6 +63,17 @@ spec:
           help: 正文中超链接的文字颜色
           value: "#576b95"
           validation: required
+        - $formkit: select
+          name: attachmentLinkDisplay
+          id: attachmentLinkDisplay
+          label: 附件链接显示
+          value: "address"
+          options:
+            - value: "address"
+              label: 显示链接地址
+            - value: "content"
+              label: 显示链接内容
+          help: 仅对无法提交到微信的正文链接（pdf、zip 等非图片附件——微信图文外链点不开、文件也无法转存）生效：插件会把这类链接改为纯文本，此处决定显示原始地址（如 /upload/2026/09/manual.pdf）还是链接自身的文字（如「下载手册」）。
         - $formkit: color
           name: inlineCodeColor
           label: 行内代码颜色

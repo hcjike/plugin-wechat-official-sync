@@ -58,6 +58,12 @@ public class WechatMpClient {
     /** 微信图片素材支持的格式，其余（如 webp）需转换后再上传。 */
     private static final Set<String> WECHAT_IMAGE_EXTS = Set.of("jpg", "jpeg", "png", "gif", "bmp");
 
+    /**
+     * 按真实字节判定时认可的图片格式：微信素材直接支持 jpg/png/gif/bmp，webp 由本类转码为 png/jpg 后上传。
+     * 用于判断正文里的附件（图片型附件链接等）能否转存为微信图片。
+     */
+    private static final Set<String> WECHAT_IMAGE_FORMATS = Set.of("jpg", "png", "gif", "bmp", "webp");
+
     /** 下载图片的响应体上限，超出即中止，避免出站请求耗尽内存。 */
     private static final int MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
 
@@ -383,6 +389,54 @@ public class WechatMpClient {
         return data != null && data.length >= 12
             && data[0] == 'R' && data[1] == 'I' && data[2] == 'F' && data[3] == 'F'
             && data[8] == 'W' && data[9] == 'E' && data[10] == 'B' && data[11] == 'P';
+    }
+
+    /**
+     * 按<b>真实字节</b>判定是否为微信可转存的图片：jpg/png/gif/bmp 由微信素材直接支持，
+     * webp 由本类解码后转码为 png/jpg 再上传，故这五种格式都算可转存。
+     *
+     * <p>只看文件魔数，不看扩展名：站点批量转 WebP 却保留 {@code .png} 后缀、附件链接指向的文件被改过名
+     * 等情况都很常见，凭后缀放行只会换来微信的 {@code 40005/40113}。调用方（如正文附件转存）据此决定
+     * 「能不能上传」，避免把非图片字节交给微信图片接口。</p>
+     */
+    public static boolean isWechatSupportedImage(byte[] data) {
+        return WECHAT_IMAGE_FORMATS.contains(imageFormatOf(data));
+    }
+
+    /**
+     * 按文件魔数识别图片真实格式（{@code jpg}/{@code png}/{@code gif}/{@code bmp}/{@code webp}），
+     * 无法识别时返回空串。
+     */
+    static String imageFormatOf(byte[] data) {
+        if (data == null) {
+            return "";
+        }
+        if (startsWith(data, 0xFF, 0xD8, 0xFF)) {
+            return "jpg";
+        }
+        if (startsWith(data, 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A)) {
+            return "png";
+        }
+        if (startsWith(data, 'G', 'I', 'F', '8')) {
+            return "gif";
+        }
+        if (startsWith(data, 'B', 'M')) {
+            return "bmp";
+        }
+        return looksLikeWebp(data) ? "webp" : "";
+    }
+
+    /** 字节是否以给定魔数序列开头（int 与 char 可混写，统一按低 8 位比较）。 */
+    private static boolean startsWith(byte[] data, int... magic) {
+        if (data.length < magic.length) {
+            return false;
+        }
+        for (int i = 0; i < magic.length; i++) {
+            if ((data[i] & 0xFF) != (magic[i] & 0xFF)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     private static String sanitize(String filename) {

@@ -1,11 +1,17 @@
 package com.hcjike.wechatofficialsync.service;
 
+import com.hcjike.wechatofficialsync.client.WechatApiException;
+import com.hcjike.wechatofficialsync.client.WechatMpClient;
 import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.net.URI;
@@ -408,5 +414,211 @@ class WechatSyncServiceTest {
 
         assertThat(errors).hasSize(1);
         assertThat(errors.get(0)).contains("未包含 AppSecret");
+    }
+
+    // ---------- 正文附件链接 ----------
+    //
+    // 规则：先按真实字节判定，只有微信支持的图片才转存为微信图片；其余（非图片附件、字节不符、下载失败）
+    // 一律不调用微信接口，把链接替换为纯文本——显示「原始地址」还是「链接自身的文字」由「附件链接显示」
+    // 配置决定；普通网页链接不视为附件、原样保留。
+
+    /** 微信接口基址（与插件默认基址一致，断言 mock 调用时用）。 */
+    private static final String API_BASE = "https://api.weixin.qq.com";
+
+    /** 仅需文件魔数正确：附件转存的判定按真实字节，与文件是否完整、能否解码无关。 */
+    private static byte[] pngMagicBytes() {
+        return new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00};
+    }
+
+    /** 处理正文附件链接（默认配置：不可提交到微信的链接显示原始地址）。 */
+    private static String transferAttachments(WechatMpClient client, String html, String baseUrl) {
+        return transferAttachments(client, html, baseUrl, new BeautifySetting());
+    }
+
+    /** 处理正文附件链接（可指定「附件链接显示」等正文美化配置）。 */
+    private static String transferAttachments(WechatMpClient client, String html, String baseUrl,
+        BeautifySetting beautify) {
+        return new WechatSyncService(client, null, null)
+            .transferAttachments(API_BASE, "TOKEN", html, baseUrl, beautify)
+            .block();
+    }
+
+    @Test
+    void imageAttachmentLinkIsUploadedAndRenderedAsWechatImage() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        when(client.download("https://blog.example.com/upload/2026/09/pic.png"))
+            .thenReturn(Mono.just(pngMagicBytes()));
+        when(client.uploadContentImage(eq(API_BASE), eq("TOKEN"), any(), eq("pic.png")))
+            .thenReturn(Mono.just("https://mmbiz.qpic.cn/mmbiz_png/WECHAT.png"));
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/pic.png\">图片附件</a></p>", "https://blog.example.com");
+
+        assertThat(result)
+            .contains("<img src=\"https://mmbiz.qpic.cn/mmbiz_png/WECHAT.png\"")
+            .doesNotContain("/upload/2026/09/pic.png");
+    }
+
+    @Test
+    void nonImageAttachmentLinkIsNotUploadedAndShownAsPlainAddress() {
+        WechatMpClient client = mock(WechatMpClient.class);
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/manual.pdf\">下载手册</a></p>", "https://blog.example.com");
+
+        assertThat(result).contains("/upload/2026/09/manual.pdf").doesNotContain("<a ");
+        verify(client, never()).download(anyString());
+        verify(client, never()).uploadContentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void nonImageAttachmentLinkShowsLinkContentWhenConfigured() {
+        // 「附件链接显示」选「显示链接内容」：用链接自身的文字呈现，而不是原始地址
+        WechatMpClient client = mock(WechatMpClient.class);
+        BeautifySetting beautify = new BeautifySetting();
+        beautify.setAttachmentLinkDisplay(BeautifySetting.ATTACHMENT_LINK_DISPLAY_CONTENT);
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/manual.pdf\">下载手册</a></p>", "https://blog.example.com",
+            beautify);
+
+        assertThat(result).contains("下载手册")
+            .doesNotContain("/upload/2026/09/manual.pdf")
+            .doesNotContain("<a ");
+        verify(client, never()).download(anyString());
+        verify(client, never()).uploadContentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void linkContentFallsBackToAddressWhenLinkHasNoText() {
+        // 「显示链接内容」但链接没有可见文字（如纯图标卡片）时回退原始地址，避免产出空白
+        WechatMpClient client = mock(WechatMpClient.class);
+        BeautifySetting beautify = new BeautifySetting();
+        beautify.setAttachmentLinkDisplay(BeautifySetting.ATTACHMENT_LINK_DISPLAY_CONTENT);
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/manual.pdf\"></a></p>", "https://blog.example.com", beautify);
+
+        assertThat(result).contains("/upload/2026/09/manual.pdf");
+    }
+
+    @Test
+    void unknownLinkDisplayValueFallsBackToAddress() {
+        // 取值非法（如升级残留的旧值）时按「显示链接地址」处理
+        WechatMpClient client = mock(WechatMpClient.class);
+        BeautifySetting beautify = new BeautifySetting();
+        beautify.setAttachmentLinkDisplay("mystery");
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/manual.pdf\">下载手册</a></p>", "https://blog.example.com",
+            beautify);
+
+        assertThat(result).contains("/upload/2026/09/manual.pdf").doesNotContain("下载手册");
+    }
+
+    @Test
+    void attachmentWithImageExtensionButNonImageBytesIsShownAsPlainAddress() {
+        // 扩展名像图片、真实字节不是：不得上传（微信图片接口只会返回 40005/40113），改为纯文本呈现
+        WechatMpClient client = mock(WechatMpClient.class);
+        when(client.download("https://blog.example.com/upload/2026/09/fake.png"))
+            .thenReturn(Mono.just(new byte[] {1, 2, 3}));
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/fake.png\">附件</a></p>", "https://blog.example.com");
+
+        assertThat(result).contains("/upload/2026/09/fake.png").doesNotContain("<img");
+        verify(client, never()).uploadContentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void attachmentDownloadFailureDegradesToPlainAddress() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        when(client.download("https://blog.example.com/upload/2026/09/pic.png"))
+            .thenReturn(Mono.error(new WechatApiException("下载失败")));
+
+        String result = transferAttachments(client,
+            "<p><a href=\"/upload/2026/09/pic.png\">图片附件</a></p>", "https://blog.example.com");
+
+        assertThat(result).contains("/upload/2026/09/pic.png").doesNotContain("<img");
+        verify(client, never()).uploadContentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void unresolvableAttachmentLinkWithoutBaseUrlIsShownAsPlainAddress() {
+        // 相对地址且未配置「外部访问地址」：无法解析地址，不下载，显示原始地址（正文里写的是什么就显示什么）
+        WechatMpClient client = mock(WechatMpClient.class);
+
+        String result = transferAttachments(client, "<p><a href=\"/upload/x.pdf\">附件</a></p>", "");
+
+        assertThat(result).contains("/upload/x.pdf").doesNotContain("<a ");
+        verify(client, never()).download(anyString());
+    }
+
+    @Test
+    void downloadLinkWithFileExtensionIsShownAsPlainAddress() {
+        // 「下载链接」等自定义元素在美化阶段转换出的链接（无 /upload/ 前缀，靠文件扩展名识别）：同样只显示原始地址
+        WechatMpClient client = mock(WechatMpClient.class);
+
+        String result = transferAttachments(client,
+            "<p><a href=\"https://x/f.zip\" target=\"_blank\">https://x/f.zip</a></p>",
+            "https://blog.example.com");
+
+        assertThat(result).contains("https://x/f.zip").doesNotContain("<a ");
+        verify(client, never()).download(anyString());
+    }
+
+    @Test
+    void plainWebLinksAreLeftUntouched() {
+        // 站内文章路由、无扩展名的分享页等普通链接不是「附件」，不参与处理（微信外链不可点击并不等于要改成纯文本）
+        WechatMpClient client = mock(WechatMpClient.class);
+        String html = "<p><a href=\"/archives/hello-world\">相关文章</a>"
+            + "<a href=\"https://github.com/hcjike/plugin-wechat-official-sync\">仓库</a></p>";
+
+        String result = transferAttachments(client, html, "https://blog.example.com");
+
+        assertThat(result)
+            .contains("/archives/hello-world")
+            .contains("https://github.com/hcjike/plugin-wechat-official-sync")
+            .contains("<a href");
+        verify(client, never()).download(anyString());
+        verify(client, never()).uploadContentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void previewShowsUnsubmittableAttachmentLinkAsPlainText() throws Exception {
+        // 预览与草稿保持一致：无需下载即可判定提交不到微信的附件链接，在预览里就按配置显示为纯文本
+        WechatSyncService previewService = previewServiceWithExternalUrl("https://blog.example.com/");
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p><a href=\"/upload/2026/09/manual.pdf\">下载手册</a></p>");
+        BeautifySetting beautify = new BeautifySetting();
+        beautify.setAttachmentLinkDisplay(BeautifySetting.ATTACHMENT_LINK_DISPLAY_CONTENT);
+
+        Map<String, Object> result = previewService.preview(request, new WechatSetting(), beautify).block();
+
+        assertThat(result).isNotNull();
+        assertThat((String) result.get("content")).contains("下载手册").doesNotContain("<a ");
+    }
+
+    @Test
+    void previewKeepsImageAttachmentLinkForSubmitTimeTransfer() throws Exception {
+        // 图片型附件能不能转存要下载后按真实字节判定，与正文图片一样只在提交时处理，预览中保持原链接
+        WechatSyncService previewService = previewServiceWithExternalUrl("https://blog.example.com/");
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p><a href=\"/upload/2026/09/pic.png\">图片附件</a></p>");
+
+        Map<String, Object> result =
+            previewService.preview(request, new WechatSetting(), new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        assertThat((String) result.get("content")).contains("<a href=\"/upload/2026/09/pic.png\"");
+    }
+
+    /** 构造一个「外部访问地址」为给定值的预览服务（ConfigMap 未配置时回退外部地址供应器）。 */
+    private static WechatSyncService previewServiceWithExternalUrl(String externalUrl) throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
+        ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
+        when(supplier.getRaw()).thenReturn(URI.create(externalUrl).toURL());
+        return new WechatSyncService(null, client, supplier);
     }
 }

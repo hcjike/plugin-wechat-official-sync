@@ -14,8 +14,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.nodes.TextNode;
+import org.jsoup.parser.Tag;
 import org.jsoup.select.Elements;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,6 +44,13 @@ import run.halo.app.infra.SystemSetting;
 public class WechatSyncService {
 
     private static final Logger log = LoggerFactory.getLogger(WechatSyncService.class);
+
+    /** 微信可转存的图片扩展名（webp 由客户端转码）：带这些扩展名的附件才值得下载后按真实字节复核。 */
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "bmp", "webp");
+
+    /** 页面类扩展名：站内文章路由可能带这些后缀（如 {@code /archives/x.html}），不当作附件链接处理。 */
+    private static final Set<String> PAGE_EXTENSIONS =
+        Set.of("html", "htm", "shtml", "php", "asp", "aspx", "jsp");
 
     private final WechatMpClient wechatMpClient;
 
@@ -82,11 +93,10 @@ public class WechatSyncService {
                                     .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
                                         request.getTitle(), thumbMediaId))
                                     .flatMap(thumbMediaId ->
-                                        transferImages(apiBase, token, request.getContent(), baseUrl)
-                                            .flatMap(content -> beautifyContent(content, beautify)
-                                                .flatMap(beautified -> wechatMpClient.addDraft(apiBase, token,
-                                                    buildArticle(request, setting, thumbMediaId, beautified,
-                                                        sourceUrl)))))));
+                                        prepareContent(apiBase, token, request, beautify, baseUrl)
+                                            .flatMap(content -> wechatMpClient.addDraft(apiBase, token,
+                                                buildArticle(request, setting, thumbMediaId, content,
+                                                    sourceUrl))))));
                     }))));
     }
 
@@ -109,6 +119,9 @@ public class WechatSyncService {
         return resolveExternalBaseUrl()
             .flatMap(baseUrl -> resolvePermalink(request)
                 .flatMap(permalink -> beautifyContent(request.getContent(), beautify)
+                    // 附件链接处理在预览里也要跑一遍（只做无需下载即可判定的降级），
+                    // 否则「附件链接显示」开关在预览中看不出任何效果
+                    .flatMap(html -> showUnsubmittableLinksAsPlainText(html, baseUrl, beautify))
                     .map(html -> {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
@@ -527,6 +540,20 @@ public class WechatSyncService {
     }
 
     /**
+     * 提交草稿前的正文处理链：转存正文图片 → 美化排版 → 处理附件链接。
+     *
+     * <p>三步顺序不可调换：图片转存在美化前，转存后的 {@code <img>} 会照常参与样式注入；附件链接处理在
+     * 美化<b>之后</b>，此时插件自定义元素（下载链接 / 附件卡片）已转换为标准 {@code <a>}，可一并按
+     * 「图片转存为微信图片 / 非图片显示原始地址」处理（见 {@link #transferAttachments}）。</p>
+     */
+    private Mono<String> prepareContent(String apiBase, String token, SyncRequest request,
+        BeautifySetting beautify, String baseUrl) {
+        return transferImages(apiBase, token, request.getContent(), baseUrl)
+            .flatMap(content -> beautifyContent(content, beautify))
+            .flatMap(beautified -> transferAttachments(apiBase, token, beautified, baseUrl, beautify));
+    }
+
+    /**
      * 将正文中的图片逐一转存到微信，并替换为微信返回的图片地址。
      */
     private Mono<String> transferImages(String apiBase, String token, String html, String baseUrl) {
@@ -556,6 +583,223 @@ public class WechatSyncService {
                     });
             })
             .then(Mono.fromSupplier(() -> document.body().html()));
+    }
+
+    /**
+     * 处理正文里的附件链接：{@code <a href>}（Halo 附件库文件、带文件扩展名的下载链接，以及
+     * 「下载链接」等插件自定义元素在美化阶段转换出的链接）。
+     *
+     * <p>微信图文不支持外链跳转，附件链接在草稿里既点不开，非图片文件也无法转存；而把微信图片接口不认的
+     * 字节交给它，只会换来 {@code 40005/40113}。故一律先按真实字节判定，再决定是否调用微信接口：</p>
+     * <ul>
+     *   <li>是微信支持的图片（jpg/png/gif/bmp，webp 由客户端转码）→ 转存为微信图片（{@code <img>}）；</li>
+     *   <li>其余（pdf/zip 等非图片、字节不符合、下载失败）→ <b>不调用微信接口</b>，把链接替换为
+     *       <b>纯文本</b>（见 {@link #showAsPlainText}：显示原始地址还是链接自身的文字由配置决定）。</li>
+     * </ul>
+     *
+     * <p>须在正文美化之后执行：此时插件自定义元素已转为标准 {@code <a>}，可一并处理；普通网页链接
+     * （站内文章路由、无扩展名的分享页等，见 {@link #isAttachmentLink}）不视为附件，原样保留。</p>
+     *
+     * <p>退化为纯文本时显示「原始地址」还是「链接自身的文字」由
+     * {@link BeautifySetting#getAttachmentLinkDisplay()} 配置，见 {@link #showAsPlainText}。</p>
+     */
+    Mono<String> transferAttachments(String apiBase, String token, String html, String baseUrl,
+        BeautifySetting beautify) {
+        if (html == null || html.isBlank()) {
+            return Mono.just(html == null ? "" : html);
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        document.outputSettings().prettyPrint(false);
+        Elements links = document.select("a[href]");
+        if (links.isEmpty()) {
+            return Mono.just(document.body().html());
+        }
+        boolean showLinkContent = showLinkContent(beautify);
+        return Flux.fromIterable(links)
+            .filter(WechatSyncService::isAttachmentLink)
+            .concatMap(link -> transferAttachment(apiBase, token, link, baseUrl, showLinkContent))
+            .then(Mono.fromSupplier(() -> document.body().html()));
+    }
+
+    /** 单个附件链接的转存决策与处理：能转存成微信图片就转存，否则退化为纯文本。 */
+    private Mono<Void> transferAttachment(String apiBase, String token, Element link, String baseUrl,
+        boolean showLinkContent) {
+        String href = link.attr("href").trim();
+        String url = resolveUrl(href, baseUrl);
+        if (url == null) {
+            // 相对地址且未配置「外部访问地址」：没有可下载的地址，直接退化为纯文本
+            log.info("正文附件「{}」无法解析为可下载的地址，不转存，改为{}", href, plainTextHint(showLinkContent));
+            showAsPlainText(link, href, showLinkContent);
+            return Mono.empty();
+        }
+        if (!mayBeImage(url)) {
+            // 非图片附件（/upload/x.pdf、x.zip 等）：连下载都省了，直接退化为纯文本
+            log.info("正文附件「{}」不是微信支持的图片格式，不转存，改为{}", href, plainTextHint(showLinkContent));
+            showAsPlainText(link, href, showLinkContent);
+            return Mono.empty();
+        }
+        return wechatMpClient.download(url)
+            .flatMap(bytes -> {
+                if (bytes == null || bytes.length == 0 || !WechatMpClient.isWechatSupportedImage(bytes)) {
+                    return Mono.error(new WechatApiException("内容不是微信支持的图片格式"));
+                }
+                return wechatMpClient.uploadContentImage(apiBase, token, bytes, filenameFrom(url));
+            })
+            .doOnNext(newSrc -> link.replaceWith(contentImage(newSrc)))
+            // 下载 / 字节判定 / 上传任一环节失败都退回纯文本：
+            // 留下微信不认的链接（外链在图文里不可点击）只会变成死链
+            .onErrorResume(e -> {
+                log.warn("正文附件 [{}] 转存为微信图片失败，改为{}：{}", url, plainTextHint(showLinkContent),
+                    e.getMessage());
+                showAsPlainText(link, href, showLinkContent);
+                return Mono.empty();
+            })
+            .then();
+    }
+
+    /**
+     * 预览用：只做「无需下载即可判定」的附件链接降级，让预览与草稿在这类链接上保持一致——否则
+     * 「附件链接显示」开关在预览里看不出任何效果。
+     *
+     * <p>只处理两类确定的情况：扩展名明确为非图片的附件、地址无法解析的附件。图片型附件
+     * （图片扩展名，或无扩展名的附件库路径）能不能转存，要下载后按真实字节判定，与正文图片一样
+     * 只在<b>提交时</b>才处理，预览中保持原链接（预览不下载任何资源）。</p>
+     */
+    Mono<String> showUnsubmittableLinksAsPlainText(String html, String baseUrl, BeautifySetting beautify) {
+        if (html == null || html.isBlank()) {
+            return Mono.just(html == null ? "" : html);
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        document.outputSettings().prettyPrint(false);
+        boolean showLinkContent = showLinkContent(beautify);
+        for (Element link : document.select("a[href]")) {
+            if (!isAttachmentLink(link)) {
+                continue;
+            }
+            String href = link.attr("href").trim();
+            String url = resolveUrl(href, baseUrl);
+            // 地址无法解析，或扩展名明确为非图片：无需下载即可确定提交不到微信
+            if (url == null || !mayBeImage(url)) {
+                showAsPlainText(link, href, showLinkContent);
+            }
+        }
+        return Mono.just(document.body().html());
+    }
+
+    /**
+     * 是否把该链接当作「附件链接」处理：带 {@code download} 属性的链接、站点附件库路径
+     * （Halo 本地存储为 {@code /upload/...}）、URL 末段带文件扩展名的下载链接（如 {@code x.zip}）。
+     *
+     * <p>锚点、{@code mailto:}/{@code data:} 等非文件链接，以及站内文章路由等普通网页链接（无文件扩展名，
+     * 或 {@code .html} 之类的页面后缀）都会原样保留，避免把正常超链接误改成纯文本。</p>
+     */
+    private static boolean isAttachmentLink(Element link) {
+        String href = link.attr("href").trim();
+        if (href.isEmpty() || isNonFileHref(href)) {
+            return false;
+        }
+        if (link.hasAttr("download")) {
+            return true;
+        }
+        String path = urlPath(href);
+        if (path.contains("/upload/")) {
+            return true;
+        }
+        String extension = fileExtensionOf(path);
+        return !extension.isEmpty() && !PAGE_EXTENSIONS.contains(extension);
+    }
+
+    /** 非文件类链接（页内锚点、邮件、电话、脚本、内嵌数据与自定义协议）不参与附件处理。 */
+    private static boolean isNonFileHref(String href) {
+        String lower = href.toLowerCase(Locale.ROOT);
+        if (lower.startsWith("#") || lower.startsWith("mailto:") || lower.startsWith("tel:")
+            || lower.startsWith("javascript:") || lower.startsWith("data:")) {
+            return true;
+        }
+        // 仅放行 http/https 与相对路径：其余带自定义协议的地址（weixin:// 等）直接跳过
+        int colon = lower.indexOf(':');
+        int slash = lower.indexOf('/');
+        return colon >= 0 && (slash < 0 || colon < slash)
+            && !lower.startsWith("http://") && !lower.startsWith("https://");
+    }
+
+    /**
+     * 该地址是否「可能是微信支持的图片」，决定要不要下载后按真实字节复核：扩展名明确为非图片
+     * （pdf/zip 等）时无需下载；无扩展名时仅站点附件库路径（{@code /upload/}）值得下载判定。
+     */
+    private static boolean mayBeImage(String url) {
+        String path = urlPath(url);
+        String extension = fileExtensionOf(path);
+        return extension.isEmpty() ? path.contains("/upload/") : IMAGE_EXTENSIONS.contains(extension);
+    }
+
+    /** 取 URL 的路径部分（去掉查询串与片段），用于判断附件库路径与文件扩展名。 */
+    private static String urlPath(String url) {
+        int end = url.length();
+        int hash = url.indexOf('#');
+        if (hash >= 0 && hash < end) {
+            end = hash;
+        }
+        int query = url.indexOf('?');
+        if (query >= 0 && query < end) {
+            end = query;
+        }
+        return url.substring(0, end);
+    }
+
+    /**
+     * 取路径末段的文件扩展名（小写、不含点）：以字母开头、仅含字母数字且不超过 8 位，否则视为没有扩展名
+     * （如版本号 {@code /v1.2} 不当成 {@code .2} 后缀）。
+     */
+    private static String fileExtensionOf(String path) {
+        int slash = path.lastIndexOf('/');
+        String name = slash >= 0 ? path.substring(slash + 1) : path;
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0 || dot == name.length() - 1) {
+            return "";
+        }
+        String extension = name.substring(dot + 1);
+        if (extension.length() > 8 || !Character.isLetter(extension.charAt(0))
+            || !extension.chars().allMatch(Character::isLetterOrDigit)) {
+            return "";
+        }
+        return extension.toLowerCase(Locale.ROOT);
+    }
+
+    /**
+     * 把链接替换为纯文本：微信图文里的外链本就不可点击，不可提交到微信的附件（非图片文件）也转存不了，
+     * 故以文本呈现，避免草稿里留下微信不认的死链。
+     *
+     * <p>显示内容由「附件链接显示」配置决定（{@link BeautifySetting#getAttachmentLinkDisplay()}）：
+     * 默认显示<b>原始地址</b>（正文里写的是什么就显示什么，如 {@code /upload/2026/09/manual.pdf}），
+     * 也可改为显示<b>链接自身的文字</b>（如「下载手册」）；链接没有可显示文字时一律回退原始地址，
+     * 避免产出空白。</p>
+     */
+    private static void showAsPlainText(Element link, String href, boolean showLinkContent) {
+        String content = showLinkContent ? link.text().trim() : "";
+        link.replaceWith(new TextNode(content.isEmpty() ? href : content));
+    }
+
+    /** 不可提交到微信的链接退化为纯文本时，是否显示链接内容（否则显示原始地址）。 */
+    private static boolean showLinkContent(BeautifySetting beautify) {
+        return beautify != null && BeautifySetting.ATTACHMENT_LINK_DISPLAY_CONTENT
+            .equals(beautify.getAttachmentLinkDisplay());
+    }
+
+    /** 纯文本呈现的日志提示语（写明当前生效的显示方式，便于核对配置是否已生效）。 */
+    private static String plainTextHint(boolean showLinkContent) {
+        return showLinkContent ? "显示链接内容" : "显示原始地址";
+    }
+
+    /**
+     * 按正文图片的既有样式（{@link WechatContentBeautifier#IMG_STYLE}）新建 {@code <img>}：
+     * 附件转存发生在正文美化之后，新建的图片不会经样式注入流程，故此处显式带上内联样式。
+     */
+    private static Element contentImage(String src) {
+        Element image = new Element(Tag.valueOf("img"), "");
+        image.attr("src", src);
+        image.attr("style", WechatContentBeautifier.IMG_STYLE);
+        return image;
     }
 
     private String resolveUrl(String url, String baseUrl) {

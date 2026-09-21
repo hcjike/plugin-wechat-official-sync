@@ -130,7 +130,12 @@ public final class WechatContentBeautifier {
 
     private static final String OL_STYLE = "margin:0.9em 0;padding-left:1.6em;list-style:decimal;";
 
-    private static final String IMG_STYLE =
+    /**
+     * 正文图片的内联样式（自适应宽度、居中、圆角）。注入由 {@link #injectStyles} 按标签名完成；
+     * 同步流程把「图片型附件链接」转存为微信图片时也复用本样式——该转换发生在正文美化<b>之后</b>，
+     * 新建的 {@code <img>} 不会经注入流程，复用同一常量可保证两条路径产出的图片观感一致。
+     */
+    public static final String IMG_STYLE =
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
 
     /**
