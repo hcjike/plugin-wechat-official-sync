@@ -29,11 +29,25 @@ public class BeautifySetting {
     /** {@link #tableWidthMode} 取值：宽度铺满——列宽按比例压缩进屏宽，表格始终铺满屏幕、不产生横向滚动。 */
     public static final String TABLE_WIDTH_MODE_FILL = "fill";
 
+    /** {@link #attachmentLinkDisplay} 取值：显示链接地址（默认）——以正文里写的原始地址文本呈现。 */
+    public static final String ATTACHMENT_LINK_DISPLAY_ADDRESS = "address";
+
+    /** {@link #attachmentLinkDisplay} 取值：显示链接内容——以正文里链接自身的文字呈现。 */
+    public static final String ATTACHMENT_LINK_DISPLAY_CONTENT = "content";
+
     /** 正文文字颜色（段落、列表、表格正文与根节点）。 */
     private String textColor = "#3f3f3f";
 
     /** 链接文字颜色。 */
     private String linkColor = "#576b95";
+
+    /**
+     * 不可提交到微信的正文链接（pdf、zip 等非图片附件——微信图文外链点不开、文件又无法转存）在草稿里
+     * 以纯文本呈现时，显示<b>链接地址</b>（{@link #ATTACHMENT_LINK_DISPLAY_ADDRESS}，默认，即正文里
+     * 写的原始地址，如 {@code /upload/2026/09/manual.pdf}）还是<b>链接内容</b>
+     * （{@link #ATTACHMENT_LINK_DISPLAY_CONTENT}，即链接自身的文字，如「下载手册」）。取值非法时按显示地址处理。
+     */
+    private String attachmentLinkDisplay = ATTACHMENT_LINK_DISPLAY_ADDRESS;
 
     /** 行内代码文字颜色（默认对齐 doocs/md「经典」主题的 {@code #d14}）。 */
     private String inlineCodeColor = "#d14";

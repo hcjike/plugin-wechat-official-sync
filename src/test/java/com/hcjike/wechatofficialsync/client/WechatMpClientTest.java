@@ -229,6 +229,23 @@ class WechatMpClientTest {
     }
 
     @Test
+    void wechatSupportedImageIsDecidedByRealBytes() {
+        // 正文附件转存据此决定「能不能上传」：jpg/png/gif/bmp 微信素材直接支持，webp 由客户端转码后上传
+        assertThat(WechatMpClient.isWechatSupportedImage(pngBytes())).isTrue();
+        assertThat(WechatMpClient.isWechatSupportedImage(jpegBytes())).isTrue();
+        assertThat(WechatMpClient.isWechatSupportedImage(
+            encode(new BufferedImage(4, 4, BufferedImage.TYPE_INT_RGB), "gif"))).isTrue();
+        assertThat(WechatMpClient.isWechatSupportedImage(new byte[] {'B', 'M', 0, 0})).isTrue();
+        assertThat(WechatMpClient.isWechatSupportedImage(webpBytes())).isTrue();
+
+        // 非图片与空数据一律不放行：把非图片字节交给微信图片接口只会换来 40005/40113
+        assertThat(WechatMpClient.isWechatSupportedImage("%PDF-1.7".getBytes(StandardCharsets.US_ASCII))).isFalse();
+        assertThat(WechatMpClient.isWechatSupportedImage("not-an-image".getBytes(StandardCharsets.UTF_8))).isFalse();
+        assertThat(WechatMpClient.isWechatSupportedImage(new byte[0])).isFalse();
+        assertThat(WechatMpClient.isWechatSupportedImage(null)).isFalse();
+    }
+
+    @Test
     void downloadRejectsRestrictedAddressByDefault() {
         // 默认空白名单：环回地址（典型 SSRF 目标）在预检阶段即被拒绝，不会发起连接
         assertThatThrownBy(() -> client.download(server.baseUrl() + "/upload/a.png").block())

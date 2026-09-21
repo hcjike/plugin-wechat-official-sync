@@ -130,7 +130,12 @@ public final class WechatContentBeautifier {
 
     private static final String OL_STYLE = "margin:0.9em 0;padding-left:1.6em;list-style:decimal;";
 
-    private static final String IMG_STYLE =
+    /**
+     * 正文图片的内联样式（自适应宽度、居中、圆角）。注入由 {@link #injectStyles} 按标签名完成；
+     * 同步流程把「图片型附件链接」转存为微信图片时也复用本样式——该转换发生在正文美化<b>之后</b>，
+     * 新建的 {@code <img>} 不会经注入流程，复用同一常量可保证两条路径产出的图片观感一致。
+     */
+    public static final String IMG_STYLE =
         "max-width:100%;height:auto;display:block;margin:0.9em auto;border-radius:4px;";
 
     /**
@@ -325,6 +330,10 @@ public final class WechatContentBeautifier {
         normalizeBlockWrappers(body);
         // 删除 TipTap/ProseMirror 在表格等块前后遗留的空段落（否则微信里渲染成多余空行）
         removeEmptyParagraphs(body);
+        // 压紧列表结构：列表项之间的换行/缩进空白在浏览器预览里被折叠，但微信编辑器重建列表时会把
+        // 它当成列表项内容，表现为列表前后多出空的 <li> 行（仅提交后可见）；须在代码块重建前执行——
+        // 微信原生代码块的行号列是刻意留空的 <li>，不能在此被清掉
+        normalizeLists(body);
         // 代码块重建须在通用样式注入前：重建为微信原生 code-snippet 结构（行号列 + 逐行 code 的 pre），
         // 通用样式注入会跳过该结构，结构外剩余 <code> 即行内代码
         buildCodeBlocks(body);
@@ -931,6 +940,54 @@ public final class WechatContentBeautifier {
         if (removed > 0) {
             log.info("正文美化：移除了 {} 个空段落（TipTap/ProseMirror 遗留的空行占位）", removed);
         }
+    }
+
+    /**
+     * 压紧列表结构：删除 {@code <ul>}/{@code <ol>}/{@code <li>} 直接子级里的纯空白文本节点
+     * （含 {@code &nbsp;}/零宽字符），并移除视觉为空的 {@code <li>}。
+     *
+     * <p>「Markdown 编辑块」等由 marked 渲染出的列表在项与项之间带换行与缩进
+     * （{@code <ul>\n<li>…</li>\n</ul>}）：浏览器的预览渲染会把这层空白折叠掉，但微信编辑器重建列表结构
+     * 时会把它当成列表项内容，表现为列表<b>前后（及项内）多出空的 {@code <li>} 行</b>——只在提交后的
+     * 微信编辑器里可见。这里与表格结构空白（见 {@link #removeTableStructuralWhitespace}）同法处理，
+     * 从根源消除该现象。</p>
+     *
+     * <p>须在 {@link #buildCodeBlocks} 之前执行：微信原生代码块的行号列是<b>刻意留空的 {@code <li>}</b>
+     * （行号由微信 CSS 计数器自增渲染），不能被这一步清掉。</p>
+     */
+    private static void normalizeLists(Element body) {
+        int removed = 0;
+        for (Element list : body.select("ul, ol")) {
+            for (Node child : new ArrayList<>(list.childNodes())) {
+                if (child instanceof TextNode text && hasNoVisibleText(text.getWholeText())) {
+                    text.remove();
+                    continue;
+                }
+                if (child instanceof Element item && "li".equalsIgnoreCase(item.tagName())) {
+                    removed += removeListItemWhitespace(item);
+                }
+            }
+        }
+        if (removed > 0) {
+            log.info("正文美化：移除了 {} 个空列表项（列表项之间的换行/缩进被微信当成列表项内容）", removed);
+        }
+    }
+
+    /**
+     * 压紧单个列表项：删除其直接子级的纯空白文本节点（项内首尾换行同样会撑出空白行），
+     * 并在项内容视觉为空时删除该项（返回删除数量）。
+     */
+    private static int removeListItemWhitespace(Element item) {
+        for (Node child : new ArrayList<>(item.childNodes())) {
+            if (child instanceof TextNode text && hasNoVisibleText(text.getWholeText())) {
+                text.remove();
+            }
+        }
+        if (isVisuallyEmpty(item)) {
+            item.remove();
+            return 1;
+        }
+        return 0;
     }
 
     /**

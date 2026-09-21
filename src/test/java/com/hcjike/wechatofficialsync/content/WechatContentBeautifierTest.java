@@ -1446,6 +1446,45 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void markdownListStructuralWhitespaceIsRemoved() {
+        // 「Markdown 编辑块」渲染出的列表在项与项之间带换行/缩进（marked 输出）：浏览器预览会折叠这层
+        // 空白，但微信编辑器重建列表结构时会把它当成列表项内容 → 列表前后多出空的 <li> 行（仅提交后可见）
+        String html = "<div class=\"markdown-body\"><ul>\n"
+            + "  <li>第一项</li>\n"
+            + "  <li>第二项</li>\n"
+            + "</ul></div>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("\n");
+        assertThat(result).contains("第一项").contains("第二项");
+        // 结构里只剩两个列表项，不夹带会被微信当成列表项内容的空白
+        assertThat(result.split("<li", -1)).hasSize(3);
+    }
+
+    @Test
+    void emptyListItemsAreRemoved() {
+        // 空列表项在微信里就是多出来的一行空 <li>
+        String html = "<ol><li>第一项</li>\n<li></li>\n<li>第三项</li></ol>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("第一项").contains("第三项");
+        assertThat(result.split("<li", -1)).hasSize(3);
+    }
+
+    @Test
+    void blankLineBetweenBlocksInsideListItemIsRemoved() {
+        // 松散列表项内块之间的换行（<li><p>…</p>\n<p>…</p></li>）同样会被微信当成列表项内容
+        String html = "<ul><li><p>第一段</p>\n<p>第二段</p></li></ul>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains("第一段").contains("第二段");
+        assertThat(result).doesNotContain("\n");
+    }
+
+    @Test
     void markdownPlainListNestedInTaskItemKeepsBulletStyle() {
         // markdown 任务项内容里更深层嵌套的普通列表不受任务列表影响，照常注入圆点样式
         String html = "<ul>\n"
