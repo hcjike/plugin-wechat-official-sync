@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import org.jsoup.Jsoup;
 import org.jsoup.nodes.Document;
@@ -93,11 +94,13 @@ public class WechatSyncService {
      * 构建「同步预览」：按与 {@link #submit} 一致的规则解析正文美化效果与草稿元信息，
      * 但不做任何写操作——不下载/转存图片、不上传封面、不调用微信接口、不写同步记录。
      *
-     * <p>返回的 {@code content}（美化后的正文）、{@code digest}（草稿摘要，按与提交一致的规则
-     * 去除首尾空白并截断到 120 字；为空表示未填写摘要、微信默认抓取正文前 54 个字）、{@code author}
-     * （草稿作者，设置的「默认作者」优先、留空回退文章作者，与 {@link #buildArticle} 一致）、{@code sourceUrl}
-     * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后
-     * 实际写入草稿的值。</p>
+     * <p>返回的 {@code content}（美化后的正文）、{@code title}（草稿标题，按与提交一致的编辑器计字
+     * 截断到 64 字）、{@code digest}（草稿摘要，同样口径去除首尾空白并截断到 120 字；为空表示未填写
+     * 摘要、微信默认抓取正文前 54 个字）、{@code author}（草稿作者，设置的「默认作者」优先、留空回退
+     * 文章作者，两者都按编辑器计字截断到 8 字，与 {@link #buildArticle} 一致）、{@code sourceUrl}
+     * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后实际写入
+     * 草稿的值；{@code truncatedFields} 列出其中**因超过微信长度上限被截断**的字段名
+     * （{@code title} / {@code author} / {@code digest}），供 Console 在预览中给出明确标识。</p>
      */
     public Mono<Map<String, Object>> preview(SyncRequest request, WechatSetting setting,
         BeautifySetting beautify) {
@@ -109,13 +112,35 @@ public class WechatSyncService {
                     .map(html -> {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
-                        // 摘要按与提交一致的规则解析：空表示不传 digest（微信默认抓取正文前 54 个字）
-                        result.put("digest", truncateDigest(request.getDigest()));
-                        result.put("author", firstNonBlank(cfg.getAuthor(), request.getAuthor()));
+                        // 标题 / 作者 / 摘要按与提交一致的口径（编辑器计字）截断到各自上限：
+                        // 预览中显示的即最终写入草稿的值；被截断的字段名一并返回，供预览界面给出明确标识
+                        String title = truncateToWechatLength(request.getTitle(), MAX_TITLE_LENGTH);
+                        String digest = truncateDigest(request.getDigest());
+                        String rawAuthor = resolveAuthor(cfg, request.getAuthor());
+                        String author = truncateToWechatLength(rawAuthor, MAX_AUTHOR_LENGTH);
+                        result.put("title", title);
+                        result.put("digest", digest);
+                        result.put("author", author);
+                        List<String> truncatedFields = new ArrayList<>();
+                        addIfTruncated(truncatedFields, "title", request.getTitle(), title);
+                        addIfTruncated(truncatedFields, "digest", request.getDigest(), digest);
+                        addIfTruncated(truncatedFields, "author", rawAuthor, author);
+                        result.put("truncatedFields", truncatedFields);
                         result.put("sourceUrl", resolveSourceUrl(permalink, baseUrl));
                         result.put("commentMode", resolveCommentMode(cfg));
                         return result;
                     })));
+    }
+
+    /**
+     * 该字段确实被截断时把字段名收集到 {@code truncatedFields}（预览不写日志——打开弹窗时调用，
+     * 记日志会反复输出；提交路径的截断日志见 {@link #truncateWithNotice(String, String, int)}）。
+     */
+    private static void addIfTruncated(List<String> truncatedFields, String field, String original,
+        String truncated) {
+        if (isTruncated(original, truncated)) {
+            truncatedFields.add(field);
+        }
     }
 
     /**
@@ -245,11 +270,15 @@ public class WechatSyncService {
     private Map<String, Object> buildArticle(SyncRequest request, WechatSetting setting, String thumbMediaId,
         String content, String sourceUrl) {
         Map<String, Object> article = new HashMap<>();
-        article.put("title", request.getTitle() == null ? "" : request.getTitle());
-        // 作者优先级：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）
-        article.put("author", firstNonBlank(setting.getAuthor(), request.getAuthor()));
-        // 摘要：读取文章摘要并截断到 120 字（超长会被微信接口拒绝提交）；为空时不传 digest（微信默认抓取正文前 54 个字）
-        String digest = truncateDigest(request.getDigest());
+        // 标题：微信上限 64 字，超长会被 draft/add 拒绝，按编辑器计字口径截断（截断时记日志提示）
+        article.put("title", truncateWithNotice("标题", request.getTitle(), MAX_TITLE_LENGTH));
+        // 作者：插件设置的「默认作者」优先，留空时才回退到文章作者（与配置项 help「留空则使用文章作者」一致）；
+        // 两者同样按 8 字上限截断——微信服务端按平台规则校验作者名长度，超过 8 字会返回 45110（截断时记日志）
+        article.put("author",
+            truncateWithNotice("作者", resolveAuthor(setting, request.getAuthor()), MAX_AUTHOR_LENGTH));
+        // 摘要：读取文章摘要并截断到 120 字（超长会被微信接口拒绝提交）；
+        // 为空时不传 digest（微信默认抓取正文前 54 个字）
+        String digest = truncateWithNotice("摘要", request.getDigest(), MAX_DIGEST_LENGTH);
         if (!digest.isEmpty()) {
             article.put("digest", digest);
         }
@@ -266,27 +295,97 @@ public class WechatSyncService {
         return article;
     }
 
-    /** 微信图文摘要（{@code digest}）总长度上限：120 个字（微信计字：全角字符 1 字、半角字符 0.5 字、emoji 2 字；超长会被微信接口拒绝提交）。 */
+    /**
+     * 解析草稿作者：插件设置的「默认作者」优先（{@code null} / 空白视为未设置），留空时回退文章作者。
+     *
+     * <p>只做取值、不截断：长度统一由 {@link #buildArticle} 交给
+     * {@link #truncateWithNotice(String, String, int)} 处理——「默认作者」与「文章作者」都按微信
+     * {@link #MAX_AUTHOR_LENGTH} 字上限截断，避免超长导致整次提交被拒（截断会记日志提示）。</p>
+     */
+    private static String resolveAuthor(WechatSetting setting, String postAuthor) {
+        String configured = setting == null ? null : setting.getAuthor();
+        if (!isBlank(configured)) {
+            return configured;
+        }
+        return postAuthor == null ? "" : postAuthor;
+    }
+
+    /**
+     * 截断微信草稿字段，并在<b>确实发生截断</b>时记 warn：字段超长虽已被兜底截断、不会导致提交失败，
+     * 但提交到微信的内容被改动，需在日志里留下「哪个字段、原始多长、上限多少、截断后的值」以便核对。
+     *
+     * @param field            字段中文名（仅用于日志提示）
+     * @param value            原始值，可为 {@code null}
+     * @param maxWechatLength  微信计字口径的长度上限（字）
+     * @return 去除首尾空白并截断后的值；原始值为 {@code null} / 空白时返回空串
+     */
+    private String truncateWithNotice(String field, String value, int maxWechatLength) {
+        String truncated = truncateToWechatLength(value, maxWechatLength);
+        if (isTruncated(value, truncated)) {
+            log.warn("微信草稿字段「{}」超过 {} 字上限（原始 {} 字），已截断后提交：{}",
+                field, maxWechatLength, wechatLengthText(value), truncated);
+        }
+        return truncated;
+    }
+
+    /** 字段是否因超过微信长度上限被截断（截断结果与原始值去首尾空白后比较）。 */
+    private static boolean isTruncated(String original, String truncated) {
+        return !truncated.equals(original == null ? "" : original.trim());
+    }
+
+    /** 微信图文摘要（{@code digest}）总长度上限：120 个字。 */
     static final int MAX_DIGEST_LENGTH = 120;
 
     /**
+     * 微信图文标题（{@code title}）总长度上限：64 个字。
+     *
+     * <p>公众号编辑器与平台规则均为 64 字（接口文档中曾写作 32 字，实测以编辑器的 64 字为准）。</p>
+     */
+    static final int MAX_TITLE_LENGTH = 64;
+
+    /**
+     * 微信图文作者（{@code author}）总长度上限：8 个字。
+     *
+     * <p>接口文档中写作 16 字，但服务端按平台规则（作者名 8 字）校验：超过 8 字会返回
+     * {@code 45110 author size out of limit}（该码未收录在官方返回码表中），故按 8 字截断。</p>
+     */
+    static final int MAX_AUTHOR_LENGTH = 8;
+
+    /**
      * 规范化草稿摘要：去除首尾空白；为空返回空串（{@link #buildArticle} 据此不向微信传
-     * {@code digest}，由微信默认抓取正文前 54 个字）；超长时按微信的计字规则截断到
-     * {@link #MAX_DIGEST_LENGTH} 个字——一个汉字 / 全角字符计 1 个字，一个半角字符（英文字符、
-     * 数字、符号）计 0.5 个字，一个 emoji 等增补字符（UTF-16 代理对）计 2 个字（与公众号编辑器
-     * 摘要计数器实测一致）；按码点整体取舍，避免把 emoji 截成半个代理对。
+     * {@code digest}，由微信默认抓取正文前 54 个字）；超长时按 {@link #truncateToWechatLength}
+     * 的计字规则截断到 {@link #MAX_DIGEST_LENGTH} 个字。
      *
      * <p><b>必须保留截断</b>：超长摘要会被微信 {@code draft/add} 接口拒绝，导致整次同步失败；
      * 不能把超长摘要原样交给微信。</p>
      */
     static String truncateDigest(String digest) {
-        if (digest == null || digest.isBlank()) {
+        return truncateToWechatLength(digest, MAX_DIGEST_LENGTH);
+    }
+
+    /**
+     * 按微信长度上限把文本截断到 {@code maxWechatLength} 个字：先去除首尾空白，为空返回空串。
+     *
+     * <p><b>计字口径与公众号编辑器一致</b>：一个汉字 / 全角字符计 1 个字，一个半角字符（英文字符、
+     * 数字、符号）计 0.5 个字，一个 emoji 等增补字符（UTF-16 代理对）计 2 个字（与公众号编辑器的
+     * 标题 / 作者 / 摘要计数器一致，实测可准确截到微信允许的长度）；按码点整体取舍，避免把 emoji
+     * 截成半个代理对。</p>
+     *
+     * <p>用于微信 {@code draft/add} 有明确上限、超长即整次提交失败的字段：
+     * {@code title}（{@link #MAX_TITLE_LENGTH} 字）、{@code author}（{@link #MAX_AUTHOR_LENGTH} 字）、
+     * {@code digest}（{@link #MAX_DIGEST_LENGTH} 字）。</p>
+     *
+     * @param text             待截断的文本，可为 {@code null}
+     * @param maxWechatLength  长度上限（字）
+     */
+    static String truncateToWechatLength(String text, int maxWechatLength) {
+        if (text == null || text.isBlank()) {
             return "";
         }
-        String trimmed = digest.trim();
+        String trimmed = text.trim();
         // 以「半角单位」计数避免浮点：半角字符 1 个单位（=0.5 字）、汉字/全角 2 个单位（=1 字）、
         // emoji 等增补字符 4 个单位（=2 字，对应 2 个 UTF-16 编码单元）
-        int maxHalfUnits = MAX_DIGEST_LENGTH * 2;
+        int maxHalfUnits = maxWechatLength * 2;
         int halfUnits = 0;
         int end = 0;
         while (end < trimmed.length()) {
@@ -301,12 +400,35 @@ public class WechatSyncService {
         return trimmed.substring(0, end);
     }
 
+    /** 文本的微信计字长度（半角单位），与 {@link #truncateToWechatLength} 同一套规则。 */
+    static int wechatHalfUnits(String text) {
+        if (text == null) {
+            return 0;
+        }
+        int units = 0;
+        int index = 0;
+        while (index < text.length()) {
+            int codePoint = text.codePointAt(index);
+            units += wechatHalfUnits(codePoint);
+            index += Character.charCount(codePoint);
+        }
+        return units;
+    }
+
     /** 单个码点的微信计字折算（半角单位）：ASCII 半角字符 1 个单位（0.5 字）；BMP 汉字/全角 2 个单位（1 字）；emoji 等增补字符 4 个单位（2 字）。 */
     private static int wechatHalfUnits(int codePoint) {
         if (codePoint <= 0x7F) {
             return 1;
         }
         return Character.charCount(codePoint) * 2;
+    }
+
+    /** 把半角单位计字格式化为「字」（半角字符 0.5 字，故保留一位小数）。 */
+    private static String wechatLengthText(String text) {
+        double length = wechatHalfUnits(text) / 2.0;
+        return length == (long) length
+            ? String.valueOf((long) length)
+            : String.format(Locale.ROOT, "%.1f", length);
     }
 
     /**
@@ -508,14 +630,5 @@ public class WechatSyncService {
     /** 空值判断（null 或纯空白）。 */
     private static boolean isBlank(String value) {
         return value == null || value.isBlank();
-    }
-
-    private static String firstNonBlank(String... values) {
-        for (String value : values) {
-            if (!isBlank(value)) {
-                return value;
-            }
-        }
-        return "";
     }
 }

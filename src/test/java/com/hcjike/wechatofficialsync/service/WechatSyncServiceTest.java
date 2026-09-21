@@ -21,9 +21,10 @@ import run.halo.app.infra.SystemSetting;
 
 /**
  * {@link WechatSyncService} 的行为验证：原文链接始终按「外部访问地址 + 文章路由」拼接；留言设置按选项映射
- * 并兼容旧开关；摘要按微信计字规则（全角 1 字、半角 0.5 字、emoji 2 字）截断到 120 字（超长摘要
- * 会被微信接口拒绝）、空白按未填写处理；预览按与提交一致的规则解析（作者优先级 / 原文链接 / 留言
- * 设置 / 正文美化）；同步前预检汇总微信配置与封面图等已知问题。
+ * 并兼容旧开关；标题（64 字）/ 作者（8 字）/ 摘要（120 字）均按公众号编辑器计字口径（汉字 1 字、
+ * 半角 0.5 字、emoji 2 字）截断到各自上限（超长会被微信接口拒绝）、空白按未填写处理；预览按与提交
+ * 一致的规则解析（标题 / 作者优先级 / 原文链接 / 留言设置 / 正文美化）并回传被截断的字段名；
+ * 同步前预检汇总微信配置与封面图等已知问题。
  */
 class WechatSyncServiceTest {
 
@@ -145,8 +146,9 @@ class WechatSyncServiceTest {
     }
 
     @Test
-    void digestTruncationAppliesWechatWidthRule() {
-        // 半角字符（英文/数字/符号）按 0.5 字计：240 个英文字符 = 120 字，整段保留
+    void digestTruncationAppliesEditorWidthRule() {
+        // 摘要按公众号编辑器计字口径：半角字符（英文/数字/符号）按 0.5 字计，
+        // 240 个英文字符 = 120 字，整段保留（该口径实测能准确截到微信允许的 120 字）
         String ascii = "a".repeat(WechatSyncService.MAX_DIGEST_LENGTH * 2);
         assertThat(WechatSyncService.truncateDigest(ascii)).isEqualTo(ascii);
         // 超出 120 字（半角单位 240）时在边界处截断：第 241 个半角字符被丢弃
@@ -157,6 +159,121 @@ class WechatSyncServiceTest {
         // 半角符号同英文一样按 0.5 字计：239 个半角符号 = 119.5 字，再加 1 个汉字（1 字）超出 120 字被截断
         String symbols = "!".repeat(239) + "中";
         assertThat(WechatSyncService.truncateDigest(symbols)).isEqualTo("!".repeat(239));
+    }
+
+    @Test
+    void titleIsTruncatedToWechatTitleLimit() {
+        // 正好 64 字保持原样；65 字截到 64 字（超长标题会被 draft/add 拒绝）
+        String exact = "标".repeat(WechatSyncService.MAX_TITLE_LENGTH);
+        assertThat(WechatSyncService.truncateToWechatLength(exact, WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo(exact);
+        assertThat(WechatSyncService.truncateToWechatLength(exact + "题", WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo(exact);
+        // 与摘要同一套编辑器计字：半角 0.5 字（128 个英文字符 = 64 字）、emoji 2 字
+        String ascii = "a".repeat(WechatSyncService.MAX_TITLE_LENGTH * 2);
+        assertThat(WechatSyncService.truncateToWechatLength(ascii, WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo(ascii);
+        assertThat(WechatSyncService.truncateToWechatLength(ascii + "b", WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo(ascii);
+        String withEmoji = "标".repeat(WechatSyncService.MAX_TITLE_LENGTH) + "😀";
+        assertThat(WechatSyncService.truncateToWechatLength(withEmoji, WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo(exact);
+        // 首尾空白去除、空白视为未设置
+        assertThat(WechatSyncService.truncateToWechatLength("  标题  ", WechatSyncService.MAX_TITLE_LENGTH))
+            .isEqualTo("标题");
+        assertThat(WechatSyncService.truncateToWechatLength("   ", WechatSyncService.MAX_TITLE_LENGTH)).isEmpty();
+        assertThat(WechatSyncService.truncateToWechatLength(null, WechatSyncService.MAX_TITLE_LENGTH)).isEmpty();
+    }
+
+    @Test
+    void authorIsTruncatedToWechatAuthorLimit() throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
+        WechatSyncService previewService =
+            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+
+        String truncatedAtLimit = "作".repeat(WechatSyncService.MAX_AUTHOR_LENGTH);
+
+        // 未配置「默认作者」：回退文章作者并按 8 字截断（超过 8 字会被 draft/add 拒绝并返回 45110）
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p>正文</p>");
+        request.setAuthor(truncatedAtLimit + "者名");
+        Map<String, Object> result = previewService.preview(request, new WechatSetting(), new BeautifySetting())
+            .block();
+
+        assertThat(result).isNotNull();
+        assertThat((String) result.get("author")).isEqualTo(truncatedAtLimit);
+
+        // 配置了「默认作者」：同样按 8 字截断（超长的配置值不再原样提交，避免整次同步失败）
+        WechatSetting setting = new WechatSetting();
+        setting.setAuthor("默认作者名".repeat(10));
+        Map<String, Object> withSettingAuthor =
+            previewService.preview(request, setting, new BeautifySetting()).block();
+
+        assertThat(withSettingAuthor).isNotNull();
+        // 「默认作者名」重复 10 次 = 50 字，截到前 8 字
+        assertThat((String) withSettingAuthor.get("author")).isEqualTo("默认作者名默认作");
+        assertThat(WechatSyncService.wechatHalfUnits((String) withSettingAuthor.get("author")))
+            .isEqualTo(WechatSyncService.MAX_AUTHOR_LENGTH * 2);
+    }
+
+    @Test
+    void wechatLengthUsesEditorCountingRule() {
+        // 计字规则（半角单位）：汉字/全角 2 个单位（1 字）、半角 1 个单位（0.5 字）、emoji 4 个单位（2 字）
+        assertThat(WechatSyncService.wechatHalfUnits("中文")).isEqualTo(4);
+        assertThat(WechatSyncService.wechatHalfUnits("ab")).isEqualTo(2);
+        assertThat(WechatSyncService.wechatHalfUnits("😀")).isEqualTo(4);
+        assertThat(WechatSyncService.wechatHalfUnits(null)).isZero();
+    }
+
+    @Test
+    void previewReturnsTitleTruncatedLikeSubmit() throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
+        WechatSyncService previewService =
+            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p>正文</p>");
+        request.setTitle("标".repeat(WechatSyncService.MAX_TITLE_LENGTH + 10));
+        Map<String, Object> result = previewService.preview(request, new WechatSetting(), new BeautifySetting())
+            .block();
+
+        assertThat(result).isNotNull();
+        // 预览展示的标题即最终写入草稿的标题（截断到 64 字）
+        assertThat((String) result.get("title")).isEqualTo("标".repeat(WechatSyncService.MAX_TITLE_LENGTH));
+    }
+
+    @Test
+    void previewReportsWhichFieldsWereTruncated() throws Exception {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
+        WechatSyncService previewService =
+            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+
+        // 标题 / 摘要 / 文章作者均超上限：truncatedFields 按截断顺序列出，供预览界面标识
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p>正文</p>");
+        request.setTitle("标".repeat(WechatSyncService.MAX_TITLE_LENGTH + 1));
+        request.setDigest("摘".repeat(WechatSyncService.MAX_DIGEST_LENGTH + 1));
+        request.setAuthor("作".repeat(WechatSyncService.MAX_AUTHOR_LENGTH + 1));
+
+        Map<String, Object> result =
+            previewService.preview(request, new WechatSetting(), new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        assertThat(result.get("truncatedFields")).isEqualTo(List.of("title", "digest", "author"));
+
+        // 都在上限内（摘要未填写）时列表为空：预览不展示任何截断标识
+        SyncRequest shortRequest = new SyncRequest();
+        shortRequest.setContent("<p>正文</p>");
+        shortRequest.setTitle("标题");
+        shortRequest.setAuthor("文章作者");
+        Map<String, Object> noTruncation =
+            previewService.preview(shortRequest, new WechatSetting(), new BeautifySetting()).block();
+
+        assertThat(noTruncation).isNotNull();
+        assertThat(noTruncation.get("truncatedFields")).isEqualTo(List.of());
     }
 
     @Test

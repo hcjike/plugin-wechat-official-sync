@@ -12,6 +12,8 @@ const VALIDATE_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/validate'
 export interface PreviewPayload {
   /** 美化后的正文 HTML（提交到微信草稿后的大致效果）。 */
   content: string
+  /** 草稿标题：按微信 64 字上限截断后的值（与提交到草稿的标题一致）。 */
+  title: string
   /** 草稿摘要；为空表示未填写（提交时不传 digest，微信默认抓取正文前 54 个字）。 */
   digest: string
   /** 草稿作者：插件「默认作者」优先，留空回退文章作者；为空表示未设置。 */
@@ -20,55 +22,17 @@ export interface PreviewPayload {
   sourceUrl: string
   /** 留言设置：close=关闭；all=所有人可留言；fans=仅关注的人可留言。 */
   commentMode: string
+  /** 因超过微信长度上限被自动截断的字段名：title / author / digest；空表示本次上传的字段都在上限内。 */
+  truncatedFields: string[]
 }
 
-/** 微信图文摘要（digest）总长度上限：120 个字（微信计字：全角字符 1 字、半角字符 0.5 字、emoji 2 字；超长会被微信接口拒绝提交）。 */
-const MAX_DIGEST_LENGTH = 120
-
 /**
- * 读取文章的摘要（Halo「摘要」字段）作为草稿 digest：
- * 空摘要返回空串（服务端不传该字段，由微信默认抓取正文前 54 个字）；
- * 超长时按微信的计字规则截断到 120 个字，避免被微信接口拒绝提交。
+ * 读取文章的摘要（Halo「摘要」字段）作为草稿 digest：原样上送（仅去除首尾空白），
+ * 截断与否由服务端按微信计字规则统一处理（预览接口会回传被截断的字段名，供界面标识）；
+ * 空摘要服务端不传该字段，由微信默认抓取正文前 54 个字。
  */
 function digestOf(post: ListedPost): string {
-  return truncateDigest(post.post.spec?.excerpt?.raw?.trim() || '')
-}
-
-/**
- * 按微信的计字规则截断摘要：一个汉字 / 全角字符计 1 个字，一个半角字符（英文字符、数字、符号）
- * 计 0.5 个字，一个 emoji 等增补字符计 2 个字（与公众号编辑器摘要计数器一致）；
- * 截断到不超过 120 个字——超长摘要会被微信接口拒绝，必须截断。
- * 与后端 WechatSyncService.truncateDigest 保持同一规则（服务端提交前会再截断一次兑底）。
- */
-function truncateDigest(text: string): string {
-  // 以「半角单位」计数避免浮点误差：半角字符 1 个单位（=0.5 个字）、汉字/全角 2 个单位（=1 个字）、
-  // emoji 等增补字符 4 个单位（=2 个字）
-  const maxHalfUnits = MAX_DIGEST_LENGTH * 2
-  let halfUnits = 0
-  let result = ''
-  // for...of 按码点迭代：emoji 等增补字符不会被截成半个代理对
-  for (const char of text) {
-    const units = wechatHalfUnitsOf(char)
-    if (halfUnits + units > maxHalfUnits) {
-      break
-    }
-    result += char
-    halfUnits += units
-  }
-  return result
-}
-
-/** 单个码点的微信计字折算（半角单位）：ASCII 半角字符 0.5 个字、汉字/全角字符 1 个字、emoji 等增补字符 2 个字。 */
-function wechatHalfUnitsOf(char: string): number {
-  const cp = char.codePointAt(0) ?? 0
-  if (cp <= 0x7f) {
-    return 1
-  }
-  // 增补字符（emoji 等）在 UTF-16 中是 2 个编码单元，公众号编辑器摘要计数器实测按 2 个字计
-  if (cp > 0xffff) {
-    return 4
-  }
-  return 2
+  return post.post.spec?.excerpt?.raw?.trim() || ''
 }
 
 /**
@@ -96,7 +60,8 @@ async function fetchRenderedContent(post: ListedPost): Promise<string> {
 }
 
 /**
- * 调用预览接口：返回美化后的正文与上传后的草稿元信息（作者 / 原文链接 / 留言设置）。
+ * 调用预览接口：返回美化后的正文与上传后的草稿元信息（标题 / 摘要 / 作者 / 原文链接 / 留言设置），
+ * 以及被微信长度上限截断的字段名（供预览界面在相应字段旁标出「已截断」）。
  */
 async function fetchPreview(post: ListedPost, content: string): Promise<PreviewPayload> {
   const { data } = await axiosInstance.post<Partial<PreviewPayload>>(PREVIEW_URL, {
@@ -105,10 +70,12 @@ async function fetchPreview(post: ListedPost, content: string): Promise<PreviewP
   })
   return {
     content: data?.content || '',
+    title: data?.title || '',
     digest: data?.digest || '',
     author: data?.author || '',
     sourceUrl: data?.sourceUrl || '',
     commentMode: data?.commentMode || 'close',
+    truncatedFields: Array.isArray(data?.truncatedFields) ? data.truncatedFields : [],
   }
 }
 

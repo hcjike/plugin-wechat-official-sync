@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { VButton } from '@halo-dev/components'
+import { Toast, VButton } from '@halo-dev/components'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import IconCloseLine from '~icons/ri/close-line'
 import type { PreviewPayload } from '../utils/syncToWechat'
 
 const props = defineProps<{
-  /** 文章标题（预览中作为图文标题展示）。 */
+  /** 文章标题；预览接口返回截断后的草稿标题时以接口返回值为准（见 titleText）。 */
   title: string
   /** 拉取美化后的正文与上传后的草稿元信息（摘要 / 作者 / 原文链接 / 留言设置）。 */
   loadPreview: () => Promise<PreviewPayload>
@@ -18,8 +18,14 @@ const emit = defineEmits<{
 }>()
 
 const html = ref('')
-/** 上传后将使用的草稿元信息（摘要 / 作者 / 原文链接 / 留言设置）。 */
+/** 上传后将使用的草稿元信息（标题 / 摘要 / 作者 / 原文链接 / 留言设置）。 */
 const meta = ref<PreviewPayload | null>(null)
+
+/**
+ * 预览中展示的图文标题：优先用服务端返回的（已按微信 32 字上限截断的）标题，
+ * 与最终写入草稿的标题保持一致；预览未返回时回退到调用方上送的文章标题。
+ */
+const titleText = computed(() => meta.value?.title || props.title)
 /** 预览正文滚动区（滚轮 / 触屏手势据此判断放行或拦截）。 */
 const bodyRef = ref<HTMLElement | null>(null)
 /** 正文渲染宿主：正文渲染进它的 Shadow DOM，与 Console 页面样式互相隔离。 */
@@ -44,6 +50,67 @@ const commentText = computed(() => {
       return '未设置'
   }
 })
+
+/** 微信对草稿字段的长度上限（字）：标题 64、作者 8、摘要 120，与后端截断规则一致。 */
+const FIELD_LIMITS = [
+  { key: 'title', label: '标题', limit: 64 },
+  { key: 'author', label: '作者', limit: 8 },
+  { key: 'digest', label: '摘要', limit: 120 },
+] as const
+
+/** 本次被服务端按微信上限截断的字段名集合。 */
+const truncatedKeys = computed(() => new Set(meta.value?.truncatedFields ?? []))
+
+/** 该字段本次是否因超过微信长度上限被截断。 */
+function isFieldTruncated(key: string) {
+  return truncatedKeys.value.has(key)
+}
+
+/** 字段的微信长度上限（字），用于标识的说明文案。 */
+function limitOf(key: string) {
+  return FIELD_LIMITS.find((field) => field.key === key)?.limit ?? 0
+}
+
+/** 截断标识的悬停说明：说明该字段的上限，以及预览中显示的即截断后最终写入草稿的值。 */
+function truncationHint(key: string, label: string) {
+  return `${label}超过微信 ${limitOf(key)} 字上限，超出部分已自动截断，预览中显示的即最终写入草稿的内容`
+}
+
+/** 被截断字段的展示名（按标题 / 作者 / 摘要顺序）。 */
+const truncatedLabels = computed(() =>
+  FIELD_LIMITS.filter((field) => isFieldTruncated(field.key)).map((field) => field.label),
+)
+
+/** 本次确实有值、需要做长度检查的字段展示名。 */
+const checkedLabels = computed(() => {
+  const labels: string[] = []
+  if (meta.value?.title) {
+    labels.push('标题')
+  }
+  if (meta.value?.author) {
+    labels.push('作者')
+  }
+  if (meta.value?.digest) {
+    labels.push('摘要')
+  }
+  return labels
+})
+
+/** 长度检查结论：只有被截断时才提示「哪些字段被截断」，否则明确告知都在上限内。 */
+const limitSummary = computed(() => {
+  if (truncatedLabels.value.length > 0) {
+    return `已按微信长度上限自动截断：${truncatedLabels.value.join('、')}`
+  }
+  if (checkedLabels.value.length > 0) {
+    return `${checkedLabels.value.join('、')}均在微信长度限制内`
+  }
+  return '暂无可检查的字段'
+})
+
+/** 长度检查结论的样式：有字段被截断时用警示色，否则用次要色。 */
+const limitsClass = computed(() =>
+  truncatedLabels.value.length > 0 ? 'sync-preview__limits--warn' : 'sync-preview__limits--ok',
+)
 
 /** 请求预览内容；失败时给出提示并允许重试或直接确认同步。 */
 async function load() {
@@ -151,6 +218,69 @@ watch([html, loading], async () => {
   await nextTick()
   renderContent()
 })
+
+/**
+ * 复制美化后的正文到剪贴板：写入 text/html（保留行内样式），供用户在同步失败时
+ * 直接粘贴到公众号编辑器手动排版；同时写入 text/plain 兜底（不支持富文本的目标）。
+ */
+async function copyContent() {
+  if (!html.value) {
+    return
+  }
+  try {
+    await writeRichClipboard(html.value, htmlToPlainText(html.value))
+    Toast.success('已复制正文，可直接粘贴到公众号编辑器')
+  } catch {
+    Toast.error('复制失败，请在预览中手动选择正文后复制')
+  }
+}
+
+/**
+ * 富文本复制：优先用异步剪贴板写入 text/html；浏览器不支持（非安全上下文、旧内核）时
+ * 回退到「临时容器选中 + execCommand('copy')」，同样能保留行内样式。
+ */
+async function writeRichClipboard(html: string, plain: string) {
+  if (navigator.clipboard && typeof ClipboardItem !== 'undefined') {
+    await navigator.clipboard.write([
+      new ClipboardItem({
+        'text/html': new Blob([html], { type: 'text/html' }),
+        'text/plain': new Blob([plain], { type: 'text/plain' }),
+      }),
+    ])
+    return
+  }
+  copyViaSelection(html)
+}
+
+/** 回退复制：把正文放进视口外的可编辑临时容器、全选后执行 copy，结束后清理选区与容器。 */
+function copyViaSelection(html: string) {
+  const holder = document.createElement('div')
+  holder.innerHTML = html
+  holder.setAttribute('contenteditable', 'true')
+  holder.style.position = 'fixed'
+  holder.style.top = '0'
+  holder.style.left = '-9999px'
+  document.body.appendChild(holder)
+  try {
+    const range = document.createRange()
+    range.selectNodeContents(holder)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    if (!document.execCommand('copy')) {
+      throw new Error('execCommand copy failed')
+    }
+  } finally {
+    window.getSelection()?.removeAllRanges()
+    holder.remove()
+  }
+}
+
+/** 从正文 HTML 提取纯文本，作为剪贴板的 text/plain 兜底内容。 */
+function htmlToPlainText(html: string) {
+  const parsed = new DOMParser().parseFromString(html, 'text/html')
+  return parsed.body?.textContent || ''
+}
 
 async function confirm() {
   if (submitting.value || loading.value) {
@@ -261,18 +391,46 @@ onBeforeUnmount(() => {
         </div>
         <template v-else>
           <div class="sync-preview__phone">
-            <h1 class="sync-preview__title">{{ title }}</h1>
+            <!-- 标题超长被截断时，紧随标题标出「已截断」（悬停可看上限与说明） -->
+            <h1 class="sync-preview__title">
+              <span>{{ titleText }}</span>
+              <span
+                v-if="isFieldTruncated('title')"
+                class="sync-preview__trim-tag"
+                :title="truncationHint('title', '标题')"
+              >
+                已截断
+              </span>
+            </h1>
             <div ref="contentRef" class="sync-preview__content" @click="blockLinkNavigation"></div>
           </div>
           <!-- 摘要：未填写时整块不显示；单独一张卡片，位于正文与草稿元信息（作者等）之间 -->
           <div v-if="meta?.digest" class="sync-preview__digest">
             <span class="sync-preview__detail-label">摘要</span>
-            <span class="sync-preview__detail-value">{{ meta.digest }}</span>
+            <span class="sync-preview__detail-value">
+              {{ meta.digest }}
+              <span
+                v-if="isFieldTruncated('digest')"
+                class="sync-preview__trim-tag"
+                :title="truncationHint('digest', '摘要')"
+              >
+                已截断
+              </span>
+            </span>
           </div>
           <div class="sync-preview__details">
             <div class="sync-preview__detail">
               <span class="sync-preview__detail-label">作者</span>
-              <span class="sync-preview__detail-value">{{ authorText }}</span>
+              <span class="sync-preview__detail-value">
+                {{ authorText }}
+                <span
+                  v-if="isFieldTruncated('author')"
+                  class="sync-preview__trim-tag"
+                  :title="truncationHint('author', '作者')"
+                >
+                  已截断
+                </span>
+              </span>
             </div>
             <div class="sync-preview__detail">
               <span class="sync-preview__detail-label">原文链接</span>
@@ -294,11 +452,23 @@ onBeforeUnmount(() => {
               <span class="sync-preview__detail-value">{{ commentText }}</span>
             </div>
           </div>
+          <!-- 长度检查结论：有字段被截断时明确列出，全部在上限内时也给出结论，避免用户不敢确认 -->
+          <p class="sync-preview__limits" :class="limitsClass">{{ limitSummary }}</p>
         </template>
       </div>
       <footer class="sync-preview__footer">
         <span class="sync-preview__hint">提交后正文图片将自动转存到微信素材库</span>
         <div class="sync-preview__actions">
+          <!-- 同步失败时的兜底出口：把美化后的正文按富文本复制走，手动粘贴到公众号编辑器 -->
+          <VButton
+            class="sync-preview__copy"
+            size="sm"
+            :disabled="loading || !html || submitting"
+            title="复制美化后的正文（保留行内样式），可粘贴到公众号编辑器手动排版；正文图片仍是原图地址、封面不在复制内容里，微信通常不会自动转存，图片与封面需自行上传处理"
+            @click="copyContent"
+          >
+            复制正文
+          </VButton>
           <VButton size="sm" :disabled="submitting" @click="cancel">取消</VButton>
           <VButton
             size="sm"
@@ -494,6 +664,43 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+/* 「已截断」标识：内联在字段值之后，悬停可查看上限与截断说明 */
+.sync-preview__trim-tag {
+  display: inline-block;
+  padding: 0 4px;
+  margin-left: 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: #b45309;
+  vertical-align: middle;
+  background: #fef3c7;
+  border-radius: 3px;
+  cursor: help;
+}
+
+/* 标题是加粗大字号，紧随其后的截断标识需保持常规字重与小字号，避免跟着标题放大 */
+.sync-preview__title .sync-preview__trim-tag {
+  font-weight: 400;
+}
+
+/* 长度检查结论：位于草稿元信息卡片下方 */
+.sync-preview__limits {
+  width: 100%;
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  text-align: right;
+  word-break: break-all;
+}
+
+.sync-preview__limits--warn {
+  color: #b45309;
+}
+
+.sync-preview__limits--ok {
+  color: #9ca3af;
+}
+
 .sync-preview__footer {
   display: flex;
   gap: 12px;
@@ -516,12 +723,43 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+/* 「复制正文」用微信绿描边 + 浅绿底，与「取消（默认灰）/ 确认同步（主色）」区分开 */
+.sync-preview__copy {
+  color: #07c160;
+  background-color: #f0fdf4;
+  border-color: #b7ebcd;
+}
+
+.sync-preview__copy:hover:not(:disabled) {
+  color: #05a850;
+  background-color: #e6fbef;
+  border-color: #8fdcae;
+}
+
+.sync-preview__copy:disabled {
+  color: #9ca3af;
+  background-color: #f9fafb;
+  border-color: #e5e7eb;
+}
+
 /* 窄屏（手机操作 Console）：弹窗接近全屏、四周留 8px 边距（不超出屏幕）；收紧文章内边距，让正文尽量占满可用宽度 */
 @media (max-width: 520px) {
   .sync-preview__panel {
     max-width: calc(100vw - 16px);
     max-height: calc(100vh - 16px);
     max-height: calc(100dvh - 16px);
+  }
+
+  /* 底栏：提示文案换到按钮下方，让「复制正文 / 取消 / 确认同步」三个按钮排得下 */
+  .sync-preview__footer {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .sync-preview__hint {
+    order: 1;
+    width: 100%;
+    text-align: left;
   }
 
   .sync-preview__phone {
