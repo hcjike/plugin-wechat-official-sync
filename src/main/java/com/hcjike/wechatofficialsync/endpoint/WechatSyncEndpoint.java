@@ -103,7 +103,7 @@ public class WechatSyncEndpoint implements CustomEndpoint {
             .switchIfEmpty(Mono.defer(() -> {
                 log.warn("文章《{}》同步被拒绝：插件尚未配置微信公众号信息", body.getTitle());
                 return taskStore
-                    .saveFailed(postName, "插件尚未配置微信公众号信息")
+                    .saveFailed(postName, body.getTitle(), "插件尚未配置微信公众号信息")
                     .then(ServerResponse.badRequest()
                         .bodyValue(Map.of(
                             "message", "请先在插件设置中配置 AppID / AppSecret")));

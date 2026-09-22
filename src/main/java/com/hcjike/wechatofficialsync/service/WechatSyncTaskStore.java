@@ -92,8 +92,8 @@ public class WechatSyncTaskStore {
     }
 
     /**
-     * 提交登记：把任务写入（或重置）为「同步中」并保存输入快照（存在同文章的旧任务时在其上重置，
-     * 同时把尝试次数清零、供重启后的自动恢复使用）。
+     * 提交登记：把任务写入（或重置）为「同步中」并保存输入快照与文章标题（存在同文章的旧任务时在其上
+     * 重置，同时把尝试次数清零、供重启后的自动恢复使用）。
      */
     public Mono<Void> savePending(String postName, SyncRequest request) {
         return withRetry(() -> upsert(newTask(postName, spec -> {
@@ -102,6 +102,7 @@ public class WechatSyncTaskStore {
             spec.setTime(Instant.now().toString());
             spec.setAttempts(0);
             spec.setRequest(request);
+            spec.setPostTitle(request == null ? null : request.getTitle());
         })), MAX_SAVE_ATTEMPTS)
             .onErrorResume(e -> {
                 log.warn("登记文章 [{}] 的同步任务失败：{}", postName, e.getMessage());
@@ -112,14 +113,15 @@ public class WechatSyncTaskStore {
 
     /**
      * 同步前即被拒绝（如未配置公众号信息）时直接登记失败状态，不保存输入快照
-     * （没有可重放的输入，用户需手动重新同步）。
+     * （没有可重放的输入，用户需手动重新同步）；{@code postTitle} 仍会留存，便于在任务记录里认出文章。
      */
-    public Mono<Void> saveFailed(String postName, String message) {
+    public Mono<Void> saveFailed(String postName, String postTitle, String message) {
         return withRetry(() -> upsert(newTask(postName, spec -> {
             spec.setStatus(SyncRecord.STATUS_FAILED);
             spec.setMessage(message);
             spec.setTime(Instant.now().toString());
             spec.setAttempts(0);
+            spec.setPostTitle(postTitle);
         })), MAX_SAVE_ATTEMPTS)
             .onErrorResume(e -> {
                 log.warn("登记文章 [{}] 的同步失败状态失败：{}", postName, e.getMessage());
@@ -159,6 +161,8 @@ public class WechatSyncTaskStore {
                 spec.setMessage(record.getMessage());
                 spec.setTime(record.getTime());
                 spec.setMediaId(record.getMediaId());
+                // 快照清空后就再也拿不到标题了，先补记一次（升级前登记、升级后才落终态的任务靠它补齐）
+                fillTitleFromSnapshot(spec);
                 spec.setRequest(null);
                 return client.update(task);
             })
@@ -167,6 +171,20 @@ public class WechatSyncTaskStore {
                 log.warn("保存文章 [{}] 的同步结果失败：{}", postName, e.getMessage());
                 return Mono.empty();
             });
+    }
+
+    /**
+     * 任务记录里还没有标题时，从输入快照补记一次——快照在落终态时会被清空，这是最后的取值机会。
+     * 已有标题（提交登记时写入）或没有快照（快照为空的失败登记）时不做改动。
+     */
+    private static void fillTitleFromSnapshot(WechatSyncTask.WechatSyncTaskSpec spec) {
+        if (spec.getPostTitle() != null && !spec.getPostTitle().isBlank()) {
+            return;
+        }
+        if (spec.getRequest() != null && spec.getRequest().getTitle() != null
+            && !spec.getRequest().getTitle().isBlank()) {
+            spec.setPostTitle(spec.getRequest().getTitle());
+        }
     }
 
     /**

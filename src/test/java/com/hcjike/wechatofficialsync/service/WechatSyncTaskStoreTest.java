@@ -54,12 +54,49 @@ class WechatSyncTaskStoreTest {
         assertThat(task.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_PENDING);
         assertThat(task.getSpec().getAttempts()).isZero();
         assertThat(task.getSpec().getRequest()).isSameAs(request);
+        // 另留存一份文章标题：输入快照落终态后会被清空，标题留在 spec 上才能长期认出文章
+        assertThat(task.getSpec().getPostTitle()).isEqualTo("文章 A");
+    }
+
+    @Test
+    void saveFailedRecordsTitleWithoutSnapshot() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(WechatSyncTask.class), anyString())).thenReturn(Mono.empty());
+        when(client.create(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
+
+        new WechatSyncTaskStore(client)
+            .saveFailed("post-a", "文章 A", "插件尚未配置微信公众号信息").block();
+
+        ArgumentCaptor<WechatSyncTask> captor = ArgumentCaptor.forClass(WechatSyncTask.class);
+        verify(client).create(captor.capture());
+        WechatSyncTask task = captor.getValue();
+        assertThat(task.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
+        // 失败登记不保存输入快照，标题是记录里唯一的文章线索
+        assertThat(task.getSpec().getPostTitle()).isEqualTo("文章 A");
+        assertThat(task.getSpec().getRequest()).isNull();
+    }
+
+    @Test
+    void completeBackfillsTitleFromSnapshotBeforeClearingIt() {
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_PENDING, 1);
+        existing.getSpec().setRequest(request("文章 A"));
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+        when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
+
+        new WechatSyncTaskStore(client).complete("post-a", SyncRecord.success("media-9")).block();
+
+        // 升级前登记、升级后才落终态的任务：快照清空前补记标题
+        assertThat(existing.getSpec().getPostTitle()).isEqualTo("文章 A");
+        assertThat(existing.getSpec().getRequest()).isNull();
     }
 
     @Test
     void savePendingResetsExistingTask() {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         WechatSyncTask existing = task("post-a", SyncRecord.STATUS_FAILED, 3);
+        existing.getSpec().setPostTitle("上一次同步时的标题");
         when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
             .thenReturn(Mono.just(existing));
         when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
@@ -69,10 +106,11 @@ class WechatSyncTaskStoreTest {
 
         verify(client, never()).create(any(WechatSyncTask.class));
         verify(client).update(existing);
-        // 重复提交即在旧任务上重置：状态回到「同步中」、尝试次数清零、输入快照刷新
+        // 重复提交即在旧任务上重置：状态回到「同步中」、尝试次数清零、输入快照与标题刷新
         assertThat(existing.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_PENDING);
         assertThat(existing.getSpec().getAttempts()).isZero();
         assertThat(existing.getSpec().getRequest()).isSameAs(request);
+        assertThat(existing.getSpec().getPostTitle()).isEqualTo("文章 A");
     }
 
     @Test
@@ -286,10 +324,12 @@ class WechatSyncTaskStoreTest {
         request.setCover("/upload/cover.png");
         WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING, 1);
         task.getSpec().setRequest(request);
+        task.getSpec().setPostTitle("文章 A");
 
         String json = objectMapper.writeValueAsString(task);
         WechatSyncTask restored = objectMapper.readValue(json, WechatSyncTask.class);
 
+        assertThat(restored.getSpec().getPostTitle()).isEqualTo("文章 A");
         assertThat(restored.getSpec().getRequest()).isNotNull();
         assertThat(restored.getSpec().getRequest().getPostName()).isEqualTo("post-a");
         assertThat(restored.getSpec().getRequest().getTitle()).isEqualTo("文章 A");
