@@ -67,6 +67,11 @@ public class WechatMediaCacheBackupService {
         // 守护线程且不等待任务收尾：插件卸载/热重载时不能留下调度线程（会牵住插件类加载器）
         created.setDaemon(true);
         created.setRemoveOnCancelPolicy(true);
+        // 停止时等正在执行的那次备份收尾（上限 5 秒）：备份是 SQLite 的 VACUUM INTO，
+        // 默认的 shutdownNow 会中断写入、可能留下临时文件或让目标文件处于半途状态；
+        // 有上限的等待既能保证 stop() 返回后备份目录不再被改动，也不会把插件卸载拖住
+        created.setWaitForTasksToCompleteOnShutdown(true);
+        created.setAwaitTerminationSeconds(5);
         created.initialize();
         scheduler = created;
         schedule(BACKUP_CRON);

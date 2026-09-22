@@ -1,5 +1,6 @@
 package com.hcjike.wechatofficialsync.model;
 
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import java.time.Instant;
 import lombok.Data;
 
@@ -53,7 +54,11 @@ public class SyncRecord {
     public static SyncRecord failed(String message) {
         SyncRecord record = new SyncRecord();
         record.setStatus(STATUS_FAILED);
-        record.setMessage(message == null || message.isBlank() ? "同步失败，请查看服务端日志" : message);
+        // 失败原因会持久化进任务记录、展示在文章列表并可经 MCP 工具返回给调用方：
+        // 统一做一次凭据脱敏（如 WebClient 异常 message 里的 access_token / secret 查询参数）
+        record.setMessage(message == null || message.isBlank()
+            ? "同步失败，请查看服务端日志"
+            : SensitiveText.mask(message));
         record.setTime(Instant.now().toString());
         return record;
     }

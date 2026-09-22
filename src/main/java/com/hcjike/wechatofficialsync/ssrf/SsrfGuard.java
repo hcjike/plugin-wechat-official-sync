@@ -1,6 +1,7 @@
 package com.hcjike.wechatofficialsync.ssrf;
 
 import com.hcjike.wechatofficialsync.client.WechatApiException;
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -47,7 +48,7 @@ public final class SsrfGuard {
         try {
             uri = new URI(url.trim());
         } catch (URISyntaxException e) {
-            throw new WechatApiException("下载地址不是合法的 URI：" + e.getMessage());
+            throw new WechatApiException("下载地址不是合法的 URI：" + SensitiveText.mask(e.getMessage()));
         }
         String scheme = uri.getScheme();
         if (scheme == null

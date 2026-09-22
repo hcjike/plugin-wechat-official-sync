@@ -1,5 +1,6 @@
 package com.hcjike.wechatofficialsync.mcp;
 
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -339,12 +340,14 @@ public class WechatMcpToolProvider implements McpToolProvider {
         Mono<McpToolResult> result) {
         log.info("MCP 工具调用：{}，入参 {}", toolName, describeArguments(invocation));
         return result
-            .onErrorResume(WechatMcpSyncException.class,
-                error -> Mono.just(McpToolResult.error(error.code(), error.getMessage())))
+            .onErrorResume(WechatMcpSyncException.class, error -> Mono.just(
+                McpToolResult.error(error.code(), SensitiveText.mask(error.getMessage()))))
             .onErrorResume(error -> {
-                log.error("MCP 工具执行异常：{}，原因：{}", toolName, error.getMessage(), error);
+                // 返回给 MCP 调用方的错误消息同样脱敏：外部系统边界上再兜一层
+                String reason = SensitiveText.mask(error.getMessage());
+                log.error("MCP 工具执行异常：{}，原因：{}", toolName, reason, error);
                 return Mono.just(McpToolResult.error("INTERNAL_ERROR",
-                    error.getMessage() == null ? "执行失败，请查看服务端日志" : error.getMessage()));
+                    reason.isBlank() ? "执行失败，请查看服务端日志" : reason));
             })
             .doOnNext(outcome -> log.info("MCP 工具返回：{}，{}", toolName, describeResult(outcome)));
     }
