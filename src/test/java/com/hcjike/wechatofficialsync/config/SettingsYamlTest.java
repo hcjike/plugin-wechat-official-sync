@@ -6,8 +6,6 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
-import java.util.stream.Collectors;
 import org.junit.jupiter.api.Test;
 import org.yaml.snakeyaml.Yaml;
 
@@ -34,16 +32,14 @@ class SettingsYamlTest {
     }
 
     @Test
-    void cacheRetentionDaysOffersExpectedOptions() throws Exception {
+    void cacheRetentionDaysIsNumberFieldWithDefault() throws Exception {
         Map<String, Object> field = formField(formOf(loadSettings(), WechatSetting.GROUP),
             "cacheRetentionDays");
 
-        // 下拉可选天数 + 「全部保留」；取值与 WechatSetting 中的常量保持一致
-        assertThat(optionValues(field)).contains("7", "15", "30", "45", "60", "90", "365",
-            WechatSetting.CACHE_RETENTION_NEVER);
-        // 默认值必须是可选项之一，否则设置页会显示成空白
-        assertThat(optionValues(field)).contains(String.valueOf(field.get("value")));
-        assertThat(field).containsEntry("value", "30");
+        // 数字输入：默认 30 天；留空 / 0 / 负数表示全部保留（见 WechatCacheCleanupService）
+        assertThat(field).containsEntry("$formkit", "number");
+        assertThat(field).containsEntry("value", 30);
+        assertThat(field).doesNotContainKey("options");
     }
 
     @SuppressWarnings("unchecked")
@@ -90,12 +86,4 @@ class SettingsYamlTest {
         }
     }
 
-    /** 下拉项的取值列表。 */
-    @SuppressWarnings("unchecked")
-    private static List<String> optionValues(Map<String, Object> field) {
-        List<Map<String, Object>> options = (List<Map<String, Object>>) field.get("options");
-        return options.stream()
-            .map(option -> Objects.toString(option.get("value"), null))
-            .collect(Collectors.toList());
-    }
 }

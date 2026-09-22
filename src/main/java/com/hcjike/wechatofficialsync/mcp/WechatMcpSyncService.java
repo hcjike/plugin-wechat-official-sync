@@ -85,8 +85,8 @@ public class WechatMcpSyncService {
      *
      * <p>复用每天 0 点计划任务的同一套规则（见 {@link WechatCacheCleanupService#cleanupNow()}）：
      * 只删除「超过保留期、且最近未被使用」的缓存记录——某张图只要还会被同步命中，它的使用时间就会
-     * 刷新，不会被误删；「全部保留」时不做删除。缓存记录的是「图片指纹 → 已上传到微信的素材」，
-     * 用于避免同一张图重复上传、挤占微信素材库。</p>
+     * 刷新，不会被误删；插件设置里「缓存保留天数」留空、0 或负数（即「全部保留」）时不做删除。
+     * 缓存记录的是「图片指纹 → 已上传到微信的素材」，用于避免同一张图重复上传、挤占微信素材库。</p>
      */
     public Mono<Map<String, Object>> cleanupCache() {
         return cacheCleanupService.cleanupNow().map(WechatMcpSyncService::cleanupResult);

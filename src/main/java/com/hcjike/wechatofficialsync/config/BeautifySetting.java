@@ -35,6 +35,15 @@ public class BeautifySetting {
     /** {@link #attachmentLinkDisplay} 取值：显示链接内容——以正文里链接自身的文字呈现。 */
     public static final String ATTACHMENT_LINK_DISPLAY_CONTENT = "content";
 
+    /** {@link #h1Align} 取值：左对齐。 */
+    public static final String H1_ALIGN_LEFT = "left";
+
+    /** {@link #h1Align} 取值：居中（默认）。 */
+    public static final String H1_ALIGN_CENTER = "center";
+
+    /** {@link #h1Align} 取值：右对齐。 */
+    public static final String H1_ALIGN_RIGHT = "right";
+
     /** 正文文字颜色（段落、列表、表格正文与根节点）。 */
     private String textColor = "#3f3f3f";
 
@@ -64,11 +73,18 @@ public class BeautifySetting {
     /** 引用块背景颜色。默认浅灰。 */
     private String blockquoteBgColor = "#f7f7f7";
 
-    /** 是否给 H2–H6 标题显示左侧强调边框（H1 居中不加边框）。默认关闭。 */
+    /** 是否给 H2–H6 标题显示左侧强调边框（H1 不加边框）。默认关闭。 */
     private boolean headingBorderEnabled = false;
 
     /** 一级标题文字颜色。 */
     private String h1Color = "#222222";
+
+    /**
+     * 一级标题的对齐方式：{@link #H1_ALIGN_LEFT} / {@link #H1_ALIGN_CENTER}（默认）/ {@link #H1_ALIGN_RIGHT}。
+     * 仅对<b>未自带对齐方式</b>的 H1 生效——正文中的 H1 若已有内联 {@code text-align} 或 {@code align}
+     * 属性，则保持原样、不被本项覆盖。取值非法时按居中处理。
+     */
+    private String h1Align = H1_ALIGN_CENTER;
 
     /** 二级标题文字颜色。 */
     private String h2Color = "#222222";

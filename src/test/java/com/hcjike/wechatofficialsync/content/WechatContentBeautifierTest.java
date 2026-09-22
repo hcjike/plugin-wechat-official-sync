@@ -636,6 +636,43 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void h1AlignIsConfigurable() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setH1Align(BeautifySetting.H1_ALIGN_LEFT);
+        // 根节点基础样式自带 1 处 text-align:left，H1 注入配置对齐后共 2 处
+        String left = WechatContentBeautifier.beautify("<h1>标题</h1>", cfg);
+        assertThat(left.split("text-align:left", -1).length - 1).isEqualTo(2);
+
+        cfg.setH1Align(BeautifySetting.H1_ALIGN_RIGHT);
+        assertThat(WechatContentBeautifier.beautify("<h1>标题</h1>", cfg)).contains("text-align:right;");
+    }
+
+    @Test
+    void h1AlignDefaultsToCenterAndInvalidValueFallsBackToCenter() {
+        assertThat(WechatContentBeautifier.beautify("<h1>标题</h1>", null)).contains("text-align:center;");
+
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setH1Align("oops");
+        String result = WechatContentBeautifier.beautify("<h1>标题</h1>", cfg);
+        assertThat(result).contains("text-align:center;");
+        assertThat(result).doesNotContain("oops");
+    }
+
+    @Test
+    void h1ExistingAlignmentIsPreserved() {
+        BeautifySetting cfg = new BeautifySetting();
+        cfg.setH1Align(BeautifySetting.H1_ALIGN_LEFT);
+        String result = WechatContentBeautifier.beautify(
+            "<h1 style=\"text-align:right;\">一</h1><h1 align=\"right\">二</h1>", cfg);
+
+        // 已自带对齐方式（内联 text-align 或 align 属性）的 H1 保持原样，不写入配置的对齐
+        // （根节点基础样式中的 text-align:left 仅 1 处）
+        assertThat(result.split("text-align:left", -1).length - 1).isEqualTo(1);
+        assertThat(result).contains("text-align:right;");
+        assertThat(result).contains("align=\"right\"");
+    }
+
+    @Test
     void codeBlockEmptyLineKeepsPlaceholder() {
         String html = "<pre><code>a\n\nb</code></pre>";
         String result = WechatContentBeautifier.beautify(html, null);

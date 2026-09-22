@@ -28,9 +28,6 @@ public class WechatSetting {
     /** 留言设置：开启留言，已关注的人（粉丝）可留言。 */
     public static final String COMMENT_MODE_FANS = "fans";
 
-    /** 缓存保留策略：全部保留（永久保留）。 */
-    public static final String CACHE_RETENTION_NEVER = "never";
-
     private String appId;
 
     /**
@@ -72,10 +69,13 @@ public class WechatSetting {
     private String imageHostAllowlist;
 
     /**
-     * 素材缓存的保留天数：取值 {@link #CACHE_RETENTION_NEVER}（全部保留）或天数（表单可选
-     * 7/15/30/45/60/90/120/180/240/300/365 天，未配置或取值非法时按 30 天处理）。
+     * 素材缓存的保留天数（表单为数字输入，默认 30）。
      *
-     *         <p>保留期按记录的「最近一次使用时间」计算：某张图只要还会被同步命中，计时就会刷新，
+     * <p>语义：<b>正数</b>＝保留天数；<b>留空、0 或负数</b>＝全部保留（永久保留，数据库会持续增长）；
+     * 取值无法识别时按 30 天处理。解析规则见
+     * {@code WechatCacheCleanupService#resolveRetentionDays(WechatSetting)}。</p>
+     *
+     * <p>保留期按记录的「最近一次使用时间」计算：某张图只要还会被同步命中，计时就会刷新，
      * 不会被清理任务误删；因此清理掉的都是确实已经不再使用的缓存。</p>
      */
     private String cacheRetentionDays;
