@@ -105,7 +105,12 @@ class WechatMediaCacheBackupServiceTest {
         Files.createFile(store.databaseFile().getParent());
 
         assertThatCode(service::runBackup).doesNotThrowAnyException();
-        assertThat(backupDirectory()).doesNotExist();
+        // 没有库就没有备份：备份目录不会被创建。
+        // 这里刻意用 Files.exists（「不存在」与「无法判定」都返回 false）而不是 PathAssert#doesNotExist：
+        // 该路径的上级是个普通文件（非目录），Linux 上 stat 这类路径返回 ENOTDIR 而非「不存在」，
+        // 而 doesNotExist 基于 Files.notExists（只在「确定不存在」时为 true），会把这个「无法判定」判成
+        // 失败——Windows 上映射为「不存在」因而通过，属于平台差异
+        assertThat(Files.exists(backupDirectory())).isFalse();
     }
 
     @Test
@@ -146,15 +151,23 @@ class WechatMediaCacheBackupServiceTest {
         return store.databaseFile().getParent().resolve(MediaCacheBackup.BACKUP_DIRECTORY);
     }
 
-    /** 备份目录下的备份文件（按文件名升序，即按时间从旧到新）。 */
+    /**
+     * 备份目录下的备份文件（按文件名升序，即按时间从旧到新）。
+     *
+     * <p>排除 {@code *.tmp}：那是正在写入中的快照，不是备份文件——计划任务每秒触发时，
+     * 下一次备份可能刚好在写临时文件，把它当备份读会读到写了一半的库。</p>
+     */
     private List<Path> listBackups() {
         Path directory = backupDirectory();
         if (!Files.isDirectory(directory)) {
             return List.of();
         }
         try (Stream<Path> files = Files.list(directory)) {
-            return files.filter(path -> path.getFileName().toString()
-                    .startsWith(MediaCacheBackup.BACKUP_FILE_PREFIX))
+            return files.filter(path -> {
+                    String name = path.getFileName().toString();
+                    return name.startsWith(MediaCacheBackup.BACKUP_FILE_PREFIX)
+                        && !name.endsWith(MediaCacheBackup.TEMPORARY_SUFFIX);
+                })
                 .sorted()
                 .toList();
         } catch (IOException e) {

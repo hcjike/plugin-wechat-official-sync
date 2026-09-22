@@ -73,6 +73,22 @@ class MediaCacheBackupTest {
     }
 
     @Test
+    void publishesBackupOnlyWhenCompleteAndLeavesNoTemporaryFile() throws Exception {
+        store.save(contentImageRecord()).block();
+
+        Path created = new MediaCacheBackup(databaseFile()).backup().orElseThrow();
+
+        // 快照先写成 *.tmp、写完才改名为备份名：目录里除这一个备份文件外不该留下任何东西。
+        // 残留的临时文件同样以 BACKUP_FILE_PREFIX 开头，会被下面这条断言抓出来
+        try (Stream<Path> files = Files.list(backupDirectory())) {
+            assertThat(files.map(path -> path.getFileName().toString()).toList())
+                .containsExactly(created.getFileName().toString());
+        }
+        // 出现在备份目录里的这份就是完整可用的快照（能被 SQLite 打开并读出内容）
+        assertThat(contentUrlOf(created)).isEqualTo(CONTENT_URL);
+    }
+
+    @Test
     void keepsOnlyLatestThreeBackupsAndLeavesOtherFilesAlone() throws Exception {
         store.save(contentImageRecord()).block();
         Path backups = backupDirectory();
