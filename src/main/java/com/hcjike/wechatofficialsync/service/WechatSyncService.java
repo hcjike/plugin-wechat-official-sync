@@ -37,6 +37,9 @@ import run.halo.app.infra.SystemSetting;
 /**
  * 文章同步到微信公众号的核心业务：获取 token、转存图片、上传封面、创建草稿。
  *
+ * <p>封面与正文图片的上传都经 {@link WechatMediaCacheService} 走素材缓存：同一份文件（按内容指纹判定）
+ * 只会向微信上传一次，之后直接复用上次返回的 media_id / 图片地址，避免挤占微信素材库。</p>
+ *
  * @author hcjike
  * @since 1.0.0
  */
@@ -58,11 +61,15 @@ public class WechatSyncService {
 
     private final ExternalUrlSupplier externalUrlSupplier;
 
+    /** 媒体上传缓存：避免同一张图被反复上传（永久素材会占用微信素材库）。 */
+    private final WechatMediaCacheService mediaCacheService;
+
     public WechatSyncService(WechatMpClient wechatMpClient, ReactiveExtensionClient client,
-        ExternalUrlSupplier externalUrlSupplier) {
+        ExternalUrlSupplier externalUrlSupplier, WechatMediaCacheService mediaCacheService) {
         this.wechatMpClient = wechatMpClient;
         this.client = client;
         this.externalUrlSupplier = externalUrlSupplier;
+        this.mediaCacheService = mediaCacheService;
     }
 
     /**
@@ -89,11 +96,13 @@ public class WechatSyncService {
                         return resolveAppSecret(setting)
                             .flatMap(appSecret -> wechatMpClient
                                 .getAccessToken(apiBase, setting.getAppId(), appSecret)
-                                .flatMap(token -> uploadCover(apiBase, token, request.getCover(), baseUrl)
-                                    .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材上传成功，thumb_media_id={}",
+                                .flatMap(token -> uploadCover(apiBase, setting.getAppId(), token,
+                                        request.getCover(), baseUrl)
+                                    .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材已就绪，thumb_media_id={}",
                                         request.getTitle(), thumbMediaId))
                                     .flatMap(thumbMediaId ->
-                                        prepareContent(apiBase, token, request, beautify, baseUrl)
+                                        prepareContent(apiBase, setting.getAppId(), token, request, beautify,
+                                                baseUrl)
                                             .flatMap(content -> wechatMpClient.addDraft(apiBase, token,
                                                 buildArticle(request, setting, thumbMediaId, content,
                                                     sourceUrl))))));
@@ -209,7 +218,7 @@ public class WechatSyncService {
 
     /**
      * 封面预检：封面缺失或无法解析为绝对地址时追加问题，返回收集的问题列表
-     * （与提交时的封面校验同一规则，见 {@link #uploadCover(String, String, String, String)}）。
+     * （与提交时的封面校验同一规则，见 {@link #uploadCover}）。
      */
     private Mono<List<String>> collectCoverIssues(SyncRequest request, List<String> errors) {
         return resolveExternalBaseUrl().map(baseUrl -> {
@@ -518,8 +527,12 @@ public class WechatSyncService {
      * <p>微信公众号草稿（draft/add）强制要求有效的封面素材 id，缺失会被拒绝并返回
      * {@code errcode=40007 invalid media_id}。因此这里不再吞掉错误、静默跳过封面，而是把
      * 「无封面 / 地址无法解析 / 下载失败 / 上传失败」的真实原因清晰抛出，便于用户定位。</p>
+     *
+     * <p>永久素材会占用微信素材库，同一张封面图（按文件内容指纹判定）此前若已上传过，
+     * 由 {@link WechatMediaCacheService} 直接复用其 media_id，不再重复上传。</p>
      */
-    private Mono<String> uploadCover(String apiBase, String token, String cover, String baseUrl) {
+    private Mono<String> uploadCover(String apiBase, String appId, String token, String cover,
+        String baseUrl) {
         String url = resolveUrl(cover, baseUrl);
         if (url == null) {
             String reason = isBlank(cover)
@@ -533,7 +546,8 @@ public class WechatSyncService {
                 if (bytes == null || bytes.length == 0) {
                     return Mono.error(new WechatApiException("封面图下载内容为空「" + url + "」，请确认该地址可正常访问"));
                 }
-                return wechatMpClient.uploadPermanentImage(apiBase, token, bytes, filenameFrom(url))
+                return mediaCacheService.resolvePermanentImage(apiBase, appId, token, bytes,
+                        filenameFrom(url), url)
                     .onErrorMap(e -> !(e instanceof WechatApiException),
                         e -> new WechatApiException("封面图上传到微信失败「" + url + "」：" + e.getMessage()));
             });
@@ -546,17 +560,21 @@ public class WechatSyncService {
      * 美化<b>之后</b>，此时插件自定义元素（下载链接 / 附件卡片）已转换为标准 {@code <a>}，可一并按
      * 「图片转存为微信图片 / 非图片显示原始地址」处理（见 {@link #transferAttachments}）。</p>
      */
-    private Mono<String> prepareContent(String apiBase, String token, SyncRequest request,
+    private Mono<String> prepareContent(String apiBase, String appId, String token, SyncRequest request,
         BeautifySetting beautify, String baseUrl) {
-        return transferImages(apiBase, token, request.getContent(), baseUrl)
+        return transferImages(apiBase, appId, token, request.getContent(), baseUrl)
             .flatMap(content -> beautifyContent(content, beautify))
-            .flatMap(beautified -> transferAttachments(apiBase, token, beautified, baseUrl, beautify));
+            .flatMap(beautified -> transferAttachments(apiBase, appId, token, beautified, baseUrl, beautify));
     }
 
     /**
      * 将正文中的图片逐一转存到微信，并替换为微信返回的图片地址。
+     *
+     * <p>同一张图（按文件内容指纹判定）此前若已转存过，由 {@link WechatMediaCacheService} 直接复用
+     * 微信返回的地址，不再重复上传。</p>
      */
-    private Mono<String> transferImages(String apiBase, String token, String html, String baseUrl) {
+    private Mono<String> transferImages(String apiBase, String appId, String token, String html,
+        String baseUrl) {
         if (html == null || html.isBlank()) {
             return Mono.just(html == null ? "" : html);
         }
@@ -574,7 +592,8 @@ public class WechatSyncService {
                     return Mono.just(image);
                 }
                 return wechatMpClient.download(url)
-                    .flatMap(bytes -> wechatMpClient.uploadContentImage(apiBase, token, bytes, filenameFrom(url)))
+                    .flatMap(bytes -> mediaCacheService.resolveContentImage(apiBase, appId, token, bytes,
+                        filenameFrom(url), url))
                     .doOnNext(newSrc -> image.attr("src", newSrc))
                     .thenReturn(image)
                     .onErrorResume(e -> {
@@ -603,8 +622,8 @@ public class WechatSyncService {
      * <p>退化为纯文本时显示「原始地址」还是「链接自身的文字」由
      * {@link BeautifySetting#getAttachmentLinkDisplay()} 配置，见 {@link #showAsPlainText}。</p>
      */
-    Mono<String> transferAttachments(String apiBase, String token, String html, String baseUrl,
-        BeautifySetting beautify) {
+    Mono<String> transferAttachments(String apiBase, String appId, String token, String html,
+        String baseUrl, BeautifySetting beautify) {
         if (html == null || html.isBlank()) {
             return Mono.just(html == null ? "" : html);
         }
@@ -617,13 +636,13 @@ public class WechatSyncService {
         boolean showLinkContent = showLinkContent(beautify);
         return Flux.fromIterable(links)
             .filter(WechatSyncService::isAttachmentLink)
-            .concatMap(link -> transferAttachment(apiBase, token, link, baseUrl, showLinkContent))
+            .concatMap(link -> transferAttachment(apiBase, appId, token, link, baseUrl, showLinkContent))
             .then(Mono.fromSupplier(() -> document.body().html()));
     }
 
-    /** 单个附件链接的转存决策与处理：能转存成微信图片就转存，否则退化为纯文本。 */
-    private Mono<Void> transferAttachment(String apiBase, String token, Element link, String baseUrl,
-        boolean showLinkContent) {
+    /** 单个附件链接的转存决策与处理：能转存成微信图片就转存，否则退化为纯文本（转存同样走媒体缓存）。 */
+    private Mono<Void> transferAttachment(String apiBase, String appId, String token, Element link,
+        String baseUrl, boolean showLinkContent) {
         String href = link.attr("href").trim();
         String url = resolveUrl(href, baseUrl);
         if (url == null) {
@@ -643,7 +662,8 @@ public class WechatSyncService {
                 if (bytes == null || bytes.length == 0 || !WechatMpClient.isWechatSupportedImage(bytes)) {
                     return Mono.error(new WechatApiException("内容不是微信支持的图片格式"));
                 }
-                return wechatMpClient.uploadContentImage(apiBase, token, bytes, filenameFrom(url));
+                return mediaCacheService.resolveContentImage(apiBase, appId, token, bytes,
+                    filenameFrom(url), url);
             })
             .doOnNext(newSrc -> link.replaceWith(contentImage(newSrc)))
             // 下载 / 字节判定 / 上传任一环节失败都退回纯文本：

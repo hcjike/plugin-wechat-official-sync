@@ -22,11 +22,15 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import javax.imageio.ImageIO;
 import javax.imageio.ImageReader;
 import javax.imageio.stream.ImageInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
@@ -64,8 +68,32 @@ public class WechatMpClient {
      */
     private static final Set<String> WECHAT_IMAGE_FORMATS = Set.of("jpg", "png", "gif", "bmp", "webp");
 
+    /**
+     * 图片归一化规则（{@link #normalizeImage}：格式支持范围、解码与重编码方式等）的版本号，
+     * 作为素材缓存键的一个维度（见 {@code WechatMediaCacheService} 与 {@code CachedMedia}）。
+     *
+     * <p>素材缓存的指纹取的是<b>转换前</b>的原始字节（转换后的字节受 JDK 编码器实现影响、跨版本并不稳定，
+     * 不适合做键），因此归一化逻辑本身的改动不会改变指纹：改了转码规则后同一张原图仍会命中旧缓存，
+     * 出现「转码 bug 已修、草稿里却还是旧产物」的情况。故把本版本号一并写入缓存并参与匹配：
+     * <b>任何会改变上传产物或上传成功率的归一化改动（如新增/移除支持格式、修正透明通道处理、
+     * 调整重编码质量、更换 webp 解码器）都必须递增此值</b>，旧缓存随之自动失效并重新上传。</p>
+     */
+    public static final String NORMALIZE_VERSION = "1";
+
     /** 下载图片的响应体上限，超出即中止，避免出站请求耗尽内存。 */
     private static final int MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
+
+    /** 微信「不合法的媒体文件 id」错误码：{@code get_material} 只有返回它才说明素材真的不存在。 */
+    private static final String INVALID_MEDIA_ID_ERRCODE = "40007";
+
+    /**
+     * 校验素材是否存在时最多读取的响应体字节数：{@code get_material} 在素材存在时返回图片二进制流，
+     * 只需读到足够判断「返回的是 JSON 还是图片」即可，没必要为一次校验把整张图拉回来。
+     */
+    private static final int RESPONSE_PEEK_BYTES = 256;
+
+    /** 微信错误响应中的 {@code errcode}（响应可能被截断，故用正则取值而不是整体反序列化）。 */
+    private static final Pattern ERRCODE_PATTERN = Pattern.compile("\"errcode\"\\s*:\\s*(-?\\d+)");
 
     /** 下载连接超时。 */
     private static final Duration DOWNLOAD_CONNECT_TIMEOUT = Duration.ofSeconds(10);
@@ -224,19 +252,133 @@ public class WechatMpClient {
             });
     }
 
+    /** 永久图片素材的上传结果。 */
+    public record PermanentImage(String mediaId, String url) {
+    }
+
     /**
-     * 上传永久图片素材（add_material），返回可用于草稿封面的 media_id。
+     * 上传永久图片素材（add_material），返回素材 id 与图片地址。
+     *
+     * <p>微信对图片类型会同时返回 {@code url}（素材图片地址）。该地址用于后续复用缓存时校验素材是否还在：
+     * 它直连微信 CDN、<b>不经过插件设置的「接口地址」代理</b>，因此即便代理没有转发
+     * {@code material/get_material} 之类的接口，也能独立判断素材是否存在。</p>
      */
-    public Mono<String> uploadPermanentImage(String apiBase, String token, byte[] data, String filename) {
+    public Mono<PermanentImage> uploadPermanentImage(String apiBase, String token, byte[] data,
+        String filename) {
         return postMultipart(apiBase + "/cgi-bin/material/add_material?access_token={token}&type=image",
                 token, data, filename)
             .flatMap(body -> {
                 Object mediaId = body.get("media_id");
                 if (mediaId != null) {
-                    return Mono.just(mediaId.toString());
+                    Object url = body.get("url");
+                    return Mono.just(new PermanentImage(mediaId.toString(),
+                        url == null ? null : url.toString()));
                 }
                 return Mono.error(new WechatApiException("上传封面素材失败：" + body));
             });
+    }
+
+    /** 微信侧图片地址的可访问性判定结果。 */
+    public enum ImageAvailability {
+
+        /** 明确可访问（2xx）：资源还在。 */
+        AVAILABLE,
+
+        /** 明确不可访问（404/410）：资源已被删除。 */
+        MISSING,
+
+        /**
+         * 无法得出结论：3xx/5xx、CDN 不支持 HEAD 返回的 405、网络异常、SSRF 拦截等。
+         * 调用方应按「无法确认」保守处理，不要据此判定失效。
+         */
+        UNKNOWN
+    }
+
+    /**
+     * 校验微信侧图片地址是否仍可访问（复用缓存前调用）。
+     *
+     * <p>正文图片用 {@code uploadimg} 返回的图片地址，永久图片素材用 {@code add_material} 返回的素材图片
+     * 地址，两者都走本方法。地址是微信 CDN 上的公开地址，<b>不经过插件设置的「接口地址」代理</b>，
+     * 因此比任何经代理转发的接口都可靠。只发 HEAD（只要响应头，不把整张图下载回来）。</p>
+     *
+     * <p>只有 2xx 判「存在」、{@code 404/410} 判「已删除」，其余状态码与请求失败一律返回
+     * {@link ImageAvailability#UNKNOWN}——判定不出来时不给出结论，由调用方保守处理。</p>
+     */
+    public Mono<ImageAvailability> checkImageAvailability(String url) {
+        return Mono.fromCallable(() -> SsrfGuard.validateAndResolve(url, ssrfPolicy.get()))
+            .subscribeOn(Schedulers.boundedElastic())
+            .flatMap(uri -> downloadWebClient.head()
+                .uri(uri)
+                .exchangeToMono(response -> Mono.just(availabilityOf(response.statusCode().value()))))
+            .onErrorResume(e -> {
+                log.warn("校验微信图片地址 [{}] 失败，无法判定：{}", url, e.getMessage());
+                return Mono.just(ImageAvailability.UNKNOWN);
+            });
+    }
+
+    /** 按 HTTP 状态码判定可访问性：只有明确的 404/410 才算已不存在，其余（3xx/5xx/405 等）无法得出确定结论。 */
+    private static ImageAvailability availabilityOf(int statusCode) {
+        if (statusCode >= 200 && statusCode < 300) {
+            return ImageAvailability.AVAILABLE;
+        }
+        return statusCode == 404 || statusCode == 410
+            ? ImageAvailability.MISSING : ImageAvailability.UNKNOWN;
+    }
+
+    /**
+     * 校验永久图片素材是否仍然存在（复用缓存里的 {@code media_id} 前调用）。
+     *
+     * <p>走 {@code material/get_material}：素材仍在时返回图片二进制流，素材已被删除时返回
+     * {@code {"errcode":40007,"errmsg":"invalid media_id"}}（两种情形的 HTTP 状态码都是 200，故必须看一眼
+     * 响应体；这里只读响应体头部 {@value #RESPONSE_PEEK_BYTES} 字节，拿到首个数据块即中止传输）。</p>
+     *
+     * <p><b>只有微信明确的 40007 才判定为「不存在」</b>：其余情况——代理没有转发该接口（返回 404、HTML
+     * 或它自己的错误 JSON）、限流、鉴权失败、响应无法解析、网络异常——一律按「仍可用」处理。若把后者也
+     * 当成失效，代理不完整时就会把有效缓存误判成失效、白白重复上传素材。</p>
+     */
+    public Mono<Boolean> permanentImageExists(String apiBase, String token, String mediaId) {
+        if (isBlank(mediaId)) {
+            return Mono.just(true);
+        }
+        return webClient.post()
+            .uri(apiBase + "/cgi-bin/material/get_material?access_token={token}", token)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(Map.of("media_id", mediaId))
+            .exchangeToMono(response -> response.bodyToFlux(DataBuffer.class)
+                .take(1)
+                .map(WechatMpClient::peek)
+                .defaultIfEmpty(new byte[0])
+                .map(head -> !isMaterialGone(head))
+                .next())
+            .onErrorResume(e -> {
+                log.warn("校验永久素材 [{}] 失败，按仍可用处理：{}", mediaId, e.getMessage());
+                return Mono.just(true);
+            });
+    }
+
+    /**
+     * 由 {@code get_material} 的响应头部判断素材是否已被删除：只有 JSON 里 {@code errcode} 是
+     * {@value #INVALID_MEDIA_ID_ERRCODE}（invalid media_id）才算删除；二进制流（图片素材本体）与其他
+     * JSON（代理未转发该接口、限流等）都不算。
+     */
+    private static boolean isMaterialGone(byte[] head) {
+        String text = new String(head, StandardCharsets.UTF_8).trim();
+        if (!text.startsWith("{")) {
+            return false;
+        }
+        Matcher matcher = ERRCODE_PATTERN.matcher(text);
+        return matcher.find() && INVALID_MEDIA_ID_ERRCODE.equals(matcher.group(1));
+    }
+
+    /** 取出响应体头部的若干字节，并释放该数据块（Netty 池化缓冲区必须显式释放）。 */
+    private static byte[] peek(DataBuffer buffer) {
+        try {
+            byte[] head = new byte[Math.min(buffer.readableByteCount(), RESPONSE_PEEK_BYTES)];
+            buffer.read(head);
+            return head;
+        } finally {
+            DataBufferUtils.release(buffer);
+        }
     }
 
     /**
@@ -315,6 +457,9 @@ public class WechatMpClient {
     /**
      * 微信仅接受 bmp/png/jpeg/jpg/gif 图片；对 webp 等其他格式先解码再重新编码为 png（含透明）
      * 或 jpg（不含透明）。无法解码时按原始字节上传，交由微信返回明确错误。
+     *
+     * <p><b>改动本方法（含格式支持范围）时必须递增 {@link #NORMALIZE_VERSION}</b>：素材缓存按
+     * 「转换前的原始字节」做键，不递增版本号的话，已被缓存的图片不会用新规则重新上传。</p>
      */
     private NormalizedImage normalizeImage(byte[] data, String filename) {
         String ext = extensionOf(filename);
