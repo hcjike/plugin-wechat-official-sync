@@ -16,8 +16,12 @@ dependencies {
     implementation 'org.jsoup:jsoup:1.18.3'
     // 纯 Java 的 webp 解码器：微信素材不支持 webp，需解码后重编码为 png/jpg
     implementation 'com.twelvemonkeys.imageio:imageio-webp:3.12.0'
+    // SQLite：缓存已上传到微信的图片（文件指纹 → 微信返回的 url / media_id），避免同一资源重复上传
+    implementation 'org.xerial:sqlite-jdbc:3.41.2.2'
 
     testImplementation 'run.halo.app:api'
+    // 仅测试用：解析并校验 extensions/settings.yaml（表单由 Halo 在运行时解析，写错不会有编译期报错）
+    testImplementation 'org.yaml:snakeyaml:2.2'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }

@@ -1,5 +1,6 @@
 package com.hcjike.wechatofficialsync.service;
 
+import com.hcjike.wechatofficialsync.cache.WechatMediaCacheStore;
 import com.hcjike.wechatofficialsync.client.WechatApiException;
 import com.hcjike.wechatofficialsync.client.WechatMpClient;
 import com.hcjike.wechatofficialsync.config.BeautifySetting;
@@ -15,9 +16,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.net.URI;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Mono;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
@@ -34,7 +37,25 @@ import run.halo.app.infra.SystemSetting;
  */
 class WechatSyncServiceTest {
 
-    private final WechatSyncService service = new WechatSyncService(null, null, null);
+    private final WechatSyncService service = new WechatSyncService(null, null, null, null);
+
+    /** 本次测试专属的临时目录：媒体缓存库建在这里，测试之间互不干扰。 */
+    @TempDir
+    Path tempDirectory;
+
+    /**
+     * 构造待测服务：媒体缓存服务指向本次测试专属的临时库（每次新建调用即一个空库）。
+     *
+     * <p>附件转存用例会真实上传（微信客户端是 mock），因此缓存必须真的可用，才能覆盖
+     * 「上传后写缓存」的路径；预览 / 预检类用例不走上传，缓存不会被触发。</p>
+     */
+    private WechatSyncService syncService(WechatMpClient wechatMpClient, ReactiveExtensionClient client,
+        ExternalUrlSupplier supplier) {
+        WechatMediaCacheStore store =
+            new WechatMediaCacheStore(() -> tempDirectory.resolve("plugins"));
+        return new WechatSyncService(wechatMpClient, client, supplier,
+            new WechatMediaCacheService(wechatMpClient, store));
+    }
 
     @Test
     void joinsExternalBaseUrlAndPermalink() {
@@ -102,7 +123,7 @@ class WechatSyncServiceTest {
             .thenReturn(Mono.empty());
         ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
         when(supplier.getRaw()).thenReturn(URI.create("https://blog.example.com/").toURL());
-        WechatSyncService previewService = new WechatSyncService(null, client, supplier);
+        WechatSyncService previewService = syncService(null, client, supplier);
 
         SyncRequest request = new SyncRequest();
         request.setContent("<p>正文</p>");
@@ -196,7 +217,7 @@ class WechatSyncServiceTest {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
         WechatSyncService previewService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         String truncatedAtLimit = "作".repeat(WechatSyncService.MAX_AUTHOR_LENGTH);
 
@@ -237,7 +258,7 @@ class WechatSyncServiceTest {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
         WechatSyncService previewService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         SyncRequest request = new SyncRequest();
         request.setContent("<p>正文</p>");
@@ -255,7 +276,7 @@ class WechatSyncServiceTest {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
         WechatSyncService previewService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         // 标题 / 摘要 / 文章作者均超上限：truncatedFields 按截断顺序列出，供预览界面标识
         SyncRequest request = new SyncRequest();
@@ -289,7 +310,7 @@ class WechatSyncServiceTest {
             .thenReturn(Mono.empty());
         // 外部访问地址未配置（ExternalUrlSupplier 返回 null），原文链接应为空
         WechatSyncService previewService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         SyncRequest request = new SyncRequest();
         request.setContent("<p>正文</p>");
@@ -313,7 +334,7 @@ class WechatSyncServiceTest {
         when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG)))
             .thenReturn(Mono.empty());
         WechatSyncService validateService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         // 完全未配置公众号信息、文章也没有封面：配置与封面两条问题一并返回
         List<String> errors = validateService.validate(new SyncRequest(), null).block();
@@ -333,7 +354,7 @@ class WechatSyncServiceTest {
         when(client.fetch(eq(Secret.class), eq("wechat-app-secret"))).thenReturn(Mono.just(secret));
         ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
         when(supplier.getRaw()).thenReturn(URI.create("https://blog.example.com/").toURL());
-        WechatSyncService validateService = new WechatSyncService(null, client, supplier);
+        WechatSyncService validateService = syncService(null, client, supplier);
 
         SyncRequest request = new SyncRequest();
         request.setCover("/upload/cover.png");
@@ -357,7 +378,7 @@ class WechatSyncServiceTest {
         when(client.fetch(eq(Secret.class), eq("wechat-app-secret"))).thenReturn(Mono.just(secret));
         // 外部访问地址未配置（ExternalUrlSupplier 返回 null），相对封面无法补全为绝对地址
         WechatSyncService validateService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         SyncRequest request = new SyncRequest();
         request.setCover("/upload/cover.png");
@@ -379,7 +400,7 @@ class WechatSyncServiceTest {
         // Secret 资源不存在（如被手动删除或改名）
         when(client.fetch(eq(Secret.class), eq("wechat-app-secret"))).thenReturn(Mono.empty());
         WechatSyncService validateService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         SyncRequest request = new SyncRequest();
         request.setCover("https://cdn.example.com/cover.jpg");
@@ -402,7 +423,7 @@ class WechatSyncServiceTest {
         when(client.fetch(eq(Secret.class), eq("wechat-app-secret")))
             .thenReturn(Mono.just(new Secret()));
         WechatSyncService validateService =
-            new WechatSyncService(null, client, mock(ExternalUrlSupplier.class));
+            syncService(null, client, mock(ExternalUrlSupplier.class));
 
         SyncRequest request = new SyncRequest();
         request.setCover("https://cdn.example.com/cover.jpg");
@@ -425,21 +446,24 @@ class WechatSyncServiceTest {
     /** 微信接口基址（与插件默认基址一致，断言 mock 调用时用）。 */
     private static final String API_BASE = "https://api.weixin.qq.com";
 
+    /** 公众号 AppID：媒体缓存按公众号分区，仅用于拼接缓存键。 */
+    private static final String APP_ID = "wx-test-app";
+
     /** 仅需文件魔数正确：附件转存的判定按真实字节，与文件是否完整、能否解码无关。 */
     private static byte[] pngMagicBytes() {
         return new byte[] {(byte) 0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00};
     }
 
     /** 处理正文附件链接（默认配置：不可提交到微信的链接显示原始地址）。 */
-    private static String transferAttachments(WechatMpClient client, String html, String baseUrl) {
+    private String transferAttachments(WechatMpClient client, String html, String baseUrl) {
         return transferAttachments(client, html, baseUrl, new BeautifySetting());
     }
 
     /** 处理正文附件链接（可指定「附件链接显示」等正文美化配置）。 */
-    private static String transferAttachments(WechatMpClient client, String html, String baseUrl,
+    private String transferAttachments(WechatMpClient client, String html, String baseUrl,
         BeautifySetting beautify) {
-        return new WechatSyncService(client, null, null)
-            .transferAttachments(API_BASE, "TOKEN", html, baseUrl, beautify)
+        return syncService(client, null, null)
+            .transferAttachments(API_BASE, APP_ID, "TOKEN", html, baseUrl, beautify)
             .block();
     }
 
@@ -614,11 +638,11 @@ class WechatSyncServiceTest {
     }
 
     /** 构造一个「外部访问地址」为给定值的预览服务（ConfigMap 未配置时回退外部地址供应器）。 */
-    private static WechatSyncService previewServiceWithExternalUrl(String externalUrl) throws Exception {
+    private WechatSyncService previewServiceWithExternalUrl(String externalUrl) throws Exception {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
         ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
         when(supplier.getRaw()).thenReturn(URI.create(externalUrl).toURL());
-        return new WechatSyncService(null, client, supplier);
+        return syncService(null, client, supplier);
     }
 }

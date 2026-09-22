@@ -48,6 +48,42 @@ spec:
           label: 图片下载白名单
           help: 选填。默认拒绝下载内网/环回等受限地址的图片（防 SSRF）。内网部署导致同步失败时，可按行添加信任目标放行：域名、*.子域、IP 或 CIDR（如 192.168.0.0/16）。留空最安全。
           value: ""
+        - $formkit: select
+          name: cacheRetentionDays
+          id: cacheRetentionDays
+          label: 缓存保留天数
+          value: "30"
+          options:
+            - value: "7"
+              label: 7 天
+            - value: "15"
+              label: 15 天
+            - value: "30"
+              label: 30 天
+            - value: "45"
+              label: 45 天
+            - value: "60"
+              label: 60 天
+            - value: "90"
+              label: 90 天
+            - value: "120"
+              label: 120 天
+            - value: "180"
+              label: 180 天
+            - value: "240"
+              label: 240 天
+            - value: "300"
+              label: 300 天
+            - value: "365"
+              label: 365 天
+            - value: "never"
+              label: 全部保留
+          help: 素材缓存会随同步不断累积，保留期之外的记录由「缓存清理计划任务」删除。保留期按「最近一次使用时间」计算——某张图只要还会被同步命中，计时就会刷新，不会被误删；被清理的都是确实已不再使用的缓存。选「全部保留」则永久保留（数据库会持续增长）。
+        - $formkit: text
+          name: cacheCleanupCron
+          label: 缓存清理计划任务
+          help: 清理缓存的定时任务，填 cron 表达式（6 位：秒 分 时 日 月 周），留空即默认每天凌晨 2 点执行：0 0 2 * * *。修改后立即生效，无需重启插件；表达式非法时会回退到默认值并在日志中告警。仅在「缓存保留天数」不为「全部保留」时真正删除数据。
+          value: "0 0 2 * * *"
     - group: beautify
       label: 正文美化
       formSchema:

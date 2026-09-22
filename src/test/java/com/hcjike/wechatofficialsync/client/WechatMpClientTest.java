@@ -146,15 +146,32 @@ class WechatMpClientTest {
     }
 
     @Test
-    void permanentImageUploadReturnsMediaId() {
-        server.plan("{\"media_id\":\"COVER_MEDIA_ID\"}");
+    void permanentImageUploadReturnsMediaIdAndImageUrl() {
+        // 图片类型的 add_material 会同时返回 media_id 与素材图片 url；后者用于复用缓存前校验素材是否还在
+        server.plan("{\"media_id\":\"COVER_MEDIA_ID\",\"url\":\"https://mmbiz.qpic.cn/mmbiz_jpg/cover.jpg\"}");
 
-        String mediaId = client.uploadPermanentImage(server.baseUrl(), "TOKEN", pngBytes(), "cover.png").block();
+        WechatMpClient.PermanentImage image =
+            client.uploadPermanentImage(server.baseUrl(), "TOKEN", pngBytes(), "cover.png").block();
 
-        assertThat(mediaId).isEqualTo("COVER_MEDIA_ID");
+        assertThat(image).isNotNull();
+        assertThat(image.mediaId()).isEqualTo("COVER_MEDIA_ID");
+        assertThat(image.url()).isEqualTo("https://mmbiz.qpic.cn/mmbiz_jpg/cover.jpg");
         assertThat(server.lastRequest().uri())
             .contains("/cgi-bin/material/add_material")
             .contains("type=image");
+    }
+
+    @Test
+    void permanentImageUploadToleratesMissingUrl() {
+        // 微信未返回 url 时不能让上传失败：素材仍然可用，只是后续无法校验存在性（按「直接复用」处理）
+        server.plan("{\"media_id\":\"COVER_MEDIA_ID\"}");
+
+        WechatMpClient.PermanentImage image =
+            client.uploadPermanentImage(server.baseUrl(), "TOKEN", pngBytes(), "cover.png").block();
+
+        assertThat(image).isNotNull();
+        assertThat(image.mediaId()).isEqualTo("COVER_MEDIA_ID");
+        assertThat(image.url()).isNull();
     }
 
     @Test
@@ -243,6 +260,73 @@ class WechatMpClientTest {
         assertThat(WechatMpClient.isWechatSupportedImage("not-an-image".getBytes(StandardCharsets.UTF_8))).isFalse();
         assertThat(WechatMpClient.isWechatSupportedImage(new byte[0])).isFalse();
         assertThat(WechatMpClient.isWechatSupportedImage(null)).isFalse();
+    }
+
+    @Test
+    void imageAvailabilityIsDecidedByStatusCode() {
+        client.setSsrfPolicy(SsrfPolicy.parse("127.0.0.1"));
+        server.plan("image-bytes");
+
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/a.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.AVAILABLE);
+        // 只用 HEAD：不为一次存在性判断把整张图下载回来
+        assertThat(server.lastRequest().method()).isEqualTo("HEAD");
+
+        // 404/410 说明图片已被删除
+        server.planStatus(404, "");
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/gone.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.MISSING);
+        server.planStatus(410, "");
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/gone2.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.MISSING);
+
+        // 其余状态（如 CDN 不支持 HEAD 返回 405、服务端错误）给不出确定结论：交由调用方保守处理
+        server.planStatus(405, "");
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/unsupported.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
+        server.planStatus(500, "");
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/error.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
+    }
+
+    @Test
+    void imageAvailabilityIsUnknownForRestrictedAddress() {
+        // 默认空白名单：受限地址在预检阶段即被拒绝，不会发起连接；判定为「无法确认」而不是「已失效」
+        assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/a.png").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
+        assertThat(server.requestCount()).isZero();
+    }
+
+    @Test
+    void permanentImageExistsOnlyForExplicitInvalidMediaId() {
+        // 素材仍在：get_material 返回图片二进制流
+        server.plan("PNG-BINARY-BYTES");
+        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+        RecordedRequest request = server.lastRequest();
+        assertThat(request.uri())
+            .contains("/cgi-bin/material/get_material")
+            .contains("access_token=TOKEN");
+        assertThat(request.bodyText()).contains("MEDIA-1");
+
+        // 微信明确回 40007：素材确实不存在
+        server.plan("{\"errcode\":40007,\"errmsg\":\"invalid media_id\"}");
+        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-GONE").block()).isFalse();
+    }
+
+    @Test
+    void permanentImageExistsTreatsOtherFailuresAsStillAvailable() {
+        // 回归用例：代理没有转发 get_material 时，返回的很可能是代理自己的报文/状态码，
+        // 绝不能据此判定素材不存在——否则有效缓存会被误判失效，导致素材被反复重复上传
+        server.planStatus(404, "<html>404 Not Found</html>");
+        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+
+        server.plan("{\"errcode\":-1,\"errmsg\":\"system error\"}");
+        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+
+        // 连不上/被拦截等失败同样按「仍可用」处理
+        assertThat(client.permanentImageExists("http://127.0.0.1:1", "TOKEN", "MEDIA-1").block()).isTrue();
+        // 没有 media_id 可校验：不给出否定结论
+        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "  ").block()).isTrue();
     }
 
     @Test
@@ -355,8 +439,8 @@ class WechatMpClientTest {
             }
             server.createContext("/", exchange -> {
                 byte[] body = exchange.getRequestBody().readAllBytes();
-                requests.add(new RecordedRequest(exchange.getRequestURI().toString(),
-                    exchange.getRequestHeaders(), body));
+                requests.add(new RecordedRequest(exchange.getRequestMethod(),
+                    exchange.getRequestURI().toString(), exchange.getRequestHeaders(), body));
                 PlannedResponse planned = responses.poll();
                 if (planned == null) {
                     planned = new PlannedResponse(200, "{}", null);
@@ -367,8 +451,14 @@ class WechatMpClientTest {
                     exchange.close();
                     return;
                 }
-                // 微信常以 text/plain 返回 JSON 正文，客户端须自行解析
                 byte[] payload = planned.body.getBytes(StandardCharsets.UTF_8);
+                // HEAD 与空正文不发送响应体
+                if ("HEAD".equalsIgnoreCase(exchange.getRequestMethod()) || payload.length == 0) {
+                    exchange.sendResponseHeaders(planned.status, -1);
+                    exchange.close();
+                    return;
+                }
+                // 微信常以 text/plain 返回 JSON 正文，客户端须自行解析
                 exchange.getResponseHeaders().add("Content-Type", "text/plain; charset=utf-8");
                 exchange.sendResponseHeaders(planned.status, payload.length);
                 exchange.getResponseBody().write(payload);
@@ -384,6 +474,11 @@ class WechatMpClientTest {
         /** 预置一次应答的 JSON 正文（先进先出）。 */
         void plan(String body) {
             responses.add(new PlannedResponse(200, body, null));
+        }
+
+        /** 预置一次指定状态码的应答（用于验证按状态码判定的存在性校验）。 */
+        void planStatus(int status, String body) {
+            responses.add(new PlannedResponse(status, body, null));
         }
 
         /** 预置一次 302 应答，用于验证下载不跟随重定向。 */
@@ -410,7 +505,7 @@ class WechatMpClientTest {
     }
 
     /** 记录一次到达本地服务器的请求，并提供 multipart 报文的简易解析。 */
-    private record RecordedRequest(String uri, Headers headers, byte[] body) {
+    private record RecordedRequest(String method, String uri, Headers headers, byte[] body) {
 
         private static final Pattern FILE_NAME = Pattern.compile("filename=\"([^\"]*)\"");
 
