@@ -3,6 +3,7 @@ package com.hcjike.wechatofficialsync;
 import com.hcjike.wechatofficialsync.cache.WechatMediaCacheStore;
 import com.hcjike.wechatofficialsync.model.WechatSyncTask;
 import com.hcjike.wechatofficialsync.service.WechatCacheCleanupService;
+import com.hcjike.wechatofficialsync.service.WechatMediaCacheBackupService;
 import com.hcjike.wechatofficialsync.service.WechatSyncTaskRunner;
 import com.hcjike.wechatofficialsync.service.WechatSyncTaskStore;
 import org.slf4j.Logger;
@@ -37,15 +38,19 @@ public class WechatOfficialSyncPlugin extends BasePlugin {
 
     private final WechatCacheCleanupService cacheCleanupService;
 
+    private final WechatMediaCacheBackupService cacheBackupService;
+
     public WechatOfficialSyncPlugin(PluginContext pluginContext, SchemeManager schemeManager,
         WechatSyncTaskStore taskStore, WechatSyncTaskRunner taskRunner,
-        WechatMediaCacheStore mediaCacheStore, WechatCacheCleanupService cacheCleanupService) {
+        WechatMediaCacheStore mediaCacheStore, WechatCacheCleanupService cacheCleanupService,
+        WechatMediaCacheBackupService cacheBackupService) {
         super(pluginContext);
         this.schemeManager = schemeManager;
         this.taskStore = taskStore;
         this.taskRunner = taskRunner;
         this.mediaCacheStore = mediaCacheStore;
         this.cacheCleanupService = cacheCleanupService;
+        this.cacheBackupService = cacheBackupService;
     }
 
     @Override
@@ -61,6 +66,8 @@ public class WechatOfficialSyncPlugin extends BasePlugin {
                 error -> log.warn("初始化媒体缓存库失败：{}", error.getMessage()));
         // 缓存清理计划任务：按设置的 cron 定时清理过期缓存（cron 与保留天数都能在设置里改，无需重启）
         cacheCleanupService.start();
+        // 缓存备份计划任务：固定每天 0 点把缓存库快照到数据目录下的 backups（与库文件同级，只留最新 3 份）
+        cacheBackupService.start();
         // 旧版本把同步记录存放在插件 ConfigMap 中，先把存量记录迁移到任务模型（只补缺失、可重复执行）；
         // 随后把因插件（或 Halo 服务）重启而中断的同步任务用持久化输入自动重放，实现重启后恢复推送
         taskStore.migrateLegacyRecords()
@@ -74,6 +81,7 @@ public class WechatOfficialSyncPlugin extends BasePlugin {
     public void stop() {
         // 先停计划任务：调度线程若跨插件生命周期存活会牵住插件的类加载器，导致热重载后旧类无法回收
         cacheCleanupService.stop();
+        cacheBackupService.stop();
         // 注销模型不会删除已保存的任务数据：再次启用插件并注册模型后仍可读取
         schemeManager.unregister(Scheme.buildFromType(WechatSyncTask.class));
         log.info("微信公众号同步插件已停止");

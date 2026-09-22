@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 import com.hcjike.wechatofficialsync.cache.WechatMediaCacheStore;
 import com.hcjike.wechatofficialsync.model.WechatSyncTask;
 import com.hcjike.wechatofficialsync.service.WechatCacheCleanupService;
+import com.hcjike.wechatofficialsync.service.WechatMediaCacheBackupService;
 import com.hcjike.wechatofficialsync.service.WechatSyncTaskRunner;
 import com.hcjike.wechatofficialsync.service.WechatSyncTaskStore;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,9 @@ class WechatOfficialSyncPluginTest {
     @Mock
     WechatCacheCleanupService cacheCleanupService;
 
+    @Mock
+    WechatMediaCacheBackupService cacheBackupService;
+
     @InjectMocks
     WechatOfficialSyncPlugin plugin;
 
@@ -60,6 +64,8 @@ class WechatOfficialSyncPluginTest {
         verify(mediaCacheStore).initialize();
         // 启动时注册缓存清理计划任务
         verify(cacheCleanupService).start();
+        // 启动时注册缓存备份计划任务（固定每天 0 点备份缓存库）
+        verify(cacheBackupService).start();
         // 恢复链在后台线程执行：先迁移旧版记录，再自动重放中断的任务
         InOrder inOrder = inOrder(taskStore, taskRunner);
         inOrder.verify(taskStore, timeout(2000)).migrateLegacyRecords();
@@ -68,8 +74,9 @@ class WechatOfficialSyncPluginTest {
         plugin.stop();
 
         // 停止时先停计划任务（否则调度线程会牵住插件类加载器），再注销模型（不删除已保存的任务数据）
-        InOrder stopOrder = inOrder(cacheCleanupService, schemeManager);
+        InOrder stopOrder = inOrder(cacheCleanupService, cacheBackupService, schemeManager);
         stopOrder.verify(cacheCleanupService).stop();
+        stopOrder.verify(cacheBackupService).stop();
         stopOrder.verify(schemeManager).unregister(any(Scheme.class));
     }
 }

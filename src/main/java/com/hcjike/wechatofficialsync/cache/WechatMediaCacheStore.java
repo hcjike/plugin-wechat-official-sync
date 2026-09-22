@@ -309,8 +309,12 @@ public class WechatMediaCacheStore {
      * 缓存库文件路径：{@code <Halo 插件根目录>/plugin-wechat-official-sync/wechat-media-cache.sqlite}，
      * 即与其他插件一致，在插件根目录下以自己的插件名建目录存放数据（插件包本身是同级的
      * {@code <插件名>-<版本>.jar}，两者互不影响，升级覆盖 jar 时不会动数据目录）。
+     *
+     * <p>对包外公开，供缓存库的备份计划任务使用（备份文件要放在与库文件同级的
+     * {@link MediaCacheBackup#BACKUP_DIRECTORY} 目录下）：库文件位置这份知识只在这里定义一次，
+     * 不在别处再拼一遍路径。</p>
      */
-    private Path databaseFile() {
+    public Path databaseFile() {
         return pluginsRootGetter.get()
             .resolve(DATA_DIRECTORY)
             .resolve(SQLITE_FILE_NAME);
