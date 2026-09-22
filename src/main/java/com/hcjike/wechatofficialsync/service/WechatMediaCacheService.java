@@ -185,7 +185,7 @@ public class WechatMediaCacheService {
                 .map(url -> CachedMedia.uploaded(appId, kind, fingerprint, normalizeVersion, sourceUrl,
                     filename, sizeOf(data), null, url));
         return uploaded.flatMap(media -> {
-            log.info("{}[{}] 上传成功并写入缓存（{} 字节）：{}", label(kind), filename, sizeOf(data),
+            log.info("{}[{}] 上传成功并写入缓存（文件大小 {} 字节）：{}", label(kind), filename, sizeOf(data),
                 media.remoteValue());
             return store.save(media).thenReturn(media.remoteValue());
         });

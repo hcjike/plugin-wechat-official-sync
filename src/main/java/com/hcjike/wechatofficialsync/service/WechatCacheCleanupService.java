@@ -5,6 +5,7 @@ import com.hcjike.wechatofficialsync.config.WechatSetting;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
+import java.util.Optional;
 import java.util.concurrent.ScheduledFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,6 +26,9 @@ import run.halo.app.plugin.ReactiveSettingFetcher;
  *
  * <p><b>保留天数仍是插件设置</b>，且在<b>每次执行时</b>读取：改完设置无需重启插件，下一次清理即按新保留期
  * 生效；留空或取值非法时按 {@link #DEFAULT_RETENTION_DAYS} 天处理，「全部保留」则不删任何记录。</p>
+ *
+ * <p><b>也可主动触发</b>：{@link #cleanupNow()} 立即按同一套规则执行一次清理，并把清理条数与生效的保留策略
+ * 返回给调用方（MCP 工具「清理素材缓存」即调用它），不影响每天 0 点的计划任务。</p>
  *
  * <p><b>执行时刻不做成设置项</b>：清理判定只看「多少天没被使用」，跑在几点对结果没有影响（至多让缓存早一天
  * 或晚一天被回收），固定每天 0 点跑一次即可，少一个容易配错的 cron 输入。</p>
@@ -138,20 +142,77 @@ public class WechatCacheCleanupService {
      */
     void runCleanup() {
         try {
-            WechatSetting setting = settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
-                .block(REACTIVE_TIMEOUT);
-            Integer retentionDays = resolveRetentionDays(setting);
-            if (retentionDays == null) {
-                log.info("缓存保留策略为「全部保留」，跳过本次缓存清理");
-                return;
-            }
-            long cutoff = Instant.now().minus(Duration.ofDays(retentionDays)).toEpochMilli();
-            Long deleted = store.purgeUnusedSince(cutoff).block(REACTIVE_TIMEOUT);
-            log.info("缓存清理完成：删除 {} 条超过 {} 天未使用的缓存记录", deleted == null ? 0L : deleted,
-                retentionDays);
+            performCleanup().block(REACTIVE_TIMEOUT);
         } catch (Exception e) {
             log.warn("缓存清理执行失败：{}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * 立即执行一次缓存清理（与计划任务同一套规则），并把结果作为返回值交给调用方——
+     * MCP 工具「清理素材缓存」用它实现「主动清理 + 返回清理条数与当前缓存配置」。
+     *
+     * <p>与计划任务共用 {@link #performCleanup()} 的判定与删除逻辑，两条路径不会出现两套口径；
+     * 异常（如读取设置失败）向上传递，由调用方决定如何处理（计划任务那条路径见
+     * {@link #runCleanup()} 的兜底日志）。</p>
+     */
+    public Mono<CleanupResult> cleanupNow() {
+        return performCleanup();
+    }
+
+    /**
+     * 清理执行体：读取保留天数 → 删除「超过保留期且最近未被使用」的记录 → 汇总结果与当前缓存配置。
+     * 计划任务与 MCP 工具共用本方法。
+     */
+    private Mono<CleanupResult> performCleanup() {
+        return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
+            // 用 Optional 承载「保留天数」：设置组缺失（如尚未保存过配置）→ 默认天数；
+            // 配置为「全部保留」→ 空 Optional（不删除任何记录）。
+            // 注意不能直接 map 出 null：Reactor 的 map 不允许映射为 null（会抛 NPE），
+            // 而 resolveRetentionDays 正是用 null 表示「全部保留」。
+            .map(setting -> Optional.ofNullable(resolveRetentionDays(setting)))
+            .defaultIfEmpty(Optional.of(DEFAULT_RETENTION_DAYS))
+            .flatMap(retentionDays -> retentionDays.isEmpty()
+                ? skipCleanup()
+                : purgeWith(retentionDays.get()));
+    }
+
+    /** 保留策略为「全部保留」：不做删除，但仍返回当前缓存配置（清理条数为 0、无判定时间）。 */
+    private Mono<CleanupResult> skipCleanup() {
+        log.info("缓存保留策略为「全部保留」，跳过本次缓存清理");
+        return outcome(null, 0L, null);
+    }
+
+    /** 删除「最近一次使用时间」早于保留期的记录，并按保留天数汇总结果。 */
+    private Mono<CleanupResult> purgeWith(int retentionDays) {
+        long cutoff = Instant.now().minus(Duration.ofDays(retentionDays)).toEpochMilli();
+        return store.purgeUnusedSince(cutoff).flatMap(deleted -> {
+            long count = deleted == null ? 0L : deleted;
+            log.info("缓存清理完成：删除 {} 条超过 {} 天未使用的缓存记录", count, retentionDays);
+            return outcome(retentionDays, count, cutoff);
+        });
+    }
+
+    /** 汇总清理结果：生效的保留策略、判定时间、删除条数与清理后的记录总数。 */
+    private Mono<CleanupResult> outcome(Integer retentionDays, long deletedRecords, Long cutoffMillis) {
+        return store.count().map(remaining -> new CleanupResult(
+            retentionDays == null ? WechatSetting.CACHE_RETENTION_NEVER : String.valueOf(retentionDays),
+            cutoffMillis == null ? "" : Instant.ofEpochMilli(cutoffMillis).toString(),
+            deletedRecords,
+            remaining));
+    }
+
+    /**
+     * 一次缓存清理的结果。
+     *
+     * @param retentionDays   生效的保留天数；{@link WechatSetting#CACHE_RETENTION_NEVER} 表示「全部保留」，
+     *                        该次不删除任何记录
+     * @param cutoff          本次判定时间（早于该时间未使用的记录被删除），ISO-8601；全部保留时为空串
+     * @param deletedRecords  本次删除的缓存记录数
+     * @param remainingRecords 清理后缓存库中的记录总数
+     */
+    public record CleanupResult(String retentionDays, String cutoff, long deletedRecords,
+        long remainingRecords) {
     }
 
     /**
