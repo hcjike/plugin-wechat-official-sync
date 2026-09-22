@@ -79,6 +79,9 @@ public class WechatMediaCacheStore {
     /** 清理：删除「最近一次使用时间」早于给定时间戳的记录。 */
     private static final String PURGE_SQL = "DELETE FROM wechat_media_cache WHERE updated_at < ?";
 
+    /** 统计记录总数（供状态查询与清理结果展示）。 */
+    private static final String COUNT_SQL = "SELECT COUNT(*) FROM wechat_media_cache";
+
     private final PluginsRootGetter pluginsRootGetter;
 
     /** 已就绪的缓存库；为 {@code null} 表示尚未初始化或已不可用（见 {@link #unavailable}）。 */
@@ -181,6 +184,18 @@ public class WechatMediaCacheStore {
             });
     }
 
+    /**
+     * 统计缓存库中的记录总数，供状态查询 / 清理结果展示；缓存不可用或统计失败时返回 {@code 0}。
+     */
+    public Mono<Long> count() {
+        return Mono.fromCallable(this::countRecords)
+            .subscribeOn(Schedulers.boundedElastic())
+            .onErrorResume(e -> {
+                log.warn("统计媒体缓存记录失败：{}", e.getMessage());
+                return Mono.just(0L);
+            });
+    }
+
     /** 查询单条记录；未命中返回 {@code null}（{@code Mono.fromCallable} 收到 null 即发出空信号）。 */
     private CachedMedia query(String appId, MediaCacheKind kind, String fingerprint,
         String normalizeVersion) throws SQLException {
@@ -247,6 +262,18 @@ public class WechatMediaCacheStore {
             PreparedStatement statement = connection.prepareStatement(PURGE_SQL)) {
             statement.setLong(1, cutoffMillis);
             return statement.executeUpdate();
+        }
+    }
+
+    /** 统计记录总数；缓存不可用时返回 {@code 0}。 */
+    private long countRecords() throws SQLException {
+        if (!ensureReady()) {
+            return 0L;
+        }
+        try (Connection connection = database.open();
+            PreparedStatement statement = connection.prepareStatement(COUNT_SQL);
+            ResultSet rows = statement.executeQuery()) {
+            return rows.next() ? rows.getLong(1) : 0L;
         }
     }
 

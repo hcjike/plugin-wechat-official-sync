@@ -254,6 +254,27 @@ class WechatMediaCacheStoreTest {
         assertThatCode(() -> store.save(null).block()).doesNotThrowAnyException();
     }
 
+    @Test
+    void countsRecords() {
+        // 首次调用即按需建库：库里没有记录时返回 0，而不是失败
+        assertThat(store.count().block()).isZero();
+
+        store.save(contentImage(FINGERPRINT, "https://mmbiz.qpic.cn/a.png")).block();
+        store.save(permanentImage("b".repeat(64), "MEDIA-ID-1")).block();
+
+        assertThat(store.count().block()).isEqualTo(2L);
+    }
+
+    @Test
+    void countsZeroWhenDatabaseCannotBeCreated() throws Exception {
+        Files.createDirectories(tempDirectory.resolve("plugins"));
+        Files.createFile(tempDirectory.resolve("plugins").resolve(WechatMediaCacheStore.DATA_DIRECTORY));
+        WechatMediaCacheStore broken = storeUnder(tempDirectory);
+
+        // 建库失败：统计返回 0（不抛异常），清理流程照常返回「删了 0 条」而不是让工具报错
+        assertThat(broken.count().block()).isZero();
+    }
+
     private static CachedMedia contentImage(String fingerprint, String contentUrl) {
         return CachedMedia.uploaded(APP_ID, MediaCacheKind.CONTENT_IMAGE, fingerprint, NORMALIZE_VERSION,
             "https://blog.example.com/upload/a.png", "a.png", 12, null, contentUrl);

@@ -6,6 +6,10 @@ plugins {
 
 group 'com.hcjike.wechatofficialsync'
 
+// MCP Server 跨插件 API 版本：MCP 工具是可选集成，编译期按「插件声明支持的最低版本」对齐，
+// 运行时的实现由已安装的 mcp-server 插件提供（见 plugin.yaml 的 pluginDependencies）
+def mcpServerApiVersion = '1.0.0'
+
 repositories {
     mavenCentral()
 }
@@ -13,6 +17,9 @@ repositories {
 dependencies {
     implementation platform('run.halo.tools.platform:plugin:2.26.0')
     compileOnly 'run.halo.app:api'
+    // 只用 compileOnly：API 与 MCP SDK 均由 mcp-server 插件在运行时提供，
+    // 绝不能打进本插件（否则与 MCP Server 的类加载器冲突）
+    compileOnly "run.halo.mcpserver:api:${mcpServerApiVersion}"
     implementation 'org.jsoup:jsoup:1.18.3'
     // 纯 Java 的 webp 解码器：微信素材不支持 webp，需解码后重编码为 png/jpg
     implementation 'com.twelvemonkeys.imageio:imageio-webp:3.12.0'
@@ -20,6 +27,9 @@ dependencies {
     implementation 'org.xerial:sqlite-jdbc:3.41.2.2'
 
     testImplementation 'run.halo.app:api'
+    // 测试会加载 MCP API 类型（如工具定义的 schema 校验），需同时加入测试类路径
+    testCompileOnly "run.halo.mcpserver:api:${mcpServerApiVersion}"
+    testRuntimeOnly "run.halo.mcpserver:api:${mcpServerApiVersion}"
     // 仅测试用：解析并校验 extensions/settings.yaml（表单由 Halo 在运行时解析，写错不会有编译期报错）
     testImplementation 'org.yaml:snakeyaml:2.2'
     testImplementation 'org.springframework.boot:spring-boot-starter-test'

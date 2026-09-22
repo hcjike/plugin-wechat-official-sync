@@ -35,6 +35,7 @@
 - **异步不阻塞**：接口立即返回 `202 Accepted`，实际同步在后台线程执行，不卡住控制台。
 - **任务持久化与重启恢复**：同步任务（含待同步的文章输入与状态）持久化为 Halo 自定义模型 `WechatSyncTask`（保存在 Halo 数据库中，随 Halo 数据备份/迁移一起走）；插件或 Halo 服务重启后，未完成的任务会**自动恢复执行**（按持久化输入重放一遍，执行时读取最新的插件配置），无需手动重新提交。
 - **状态可视化**：文章列表新增状态列，用颜色编码的微信 Logo 展示每篇文章最近一次同步结果，鼠标悬停查看详细信息。
+- **MCP 工具（可选）**：安装并启用 [Halo MCP Server](https://www.halo.run/store/apps/app-ybv96zol) 插件后，AI 助手可通过 `wechat_sync_preview`（获取预览信息）、`wechat_sync_submit`（提交同步到微信）、`wechat_sync_status`（查询同步状态）与 `wechat_cache_cleanup`（清理素材缓存）四个 MCP 工具完成预览、同步、结果查询与缓存维护，效果与在 Console 上操作一致，详见[MCP 工具](#mcp-工具可选需安装-mcp-server-插件)。
 
 > **兼容性说明**：正文美化的兼容与测试主要针对 **Halo 默认编辑器**输出的内容；由其他插件生成的内容（自定义组件、专属区块等）依赖插件自身的样式与脚本渲染，微信无法识别与渲染，因此无法同步到微信。
 
@@ -460,6 +461,34 @@ Console 侧：点击「同步到微信公众号」后先调用 `POST /validate` 
 }
 ```
 
+## MCP 工具（可选，需安装 MCP Server 插件）
+
+插件可选地与 [Halo MCP Server](https://www.halo.run/store/apps/app-ybv96zol) 集成，向 AI 助手贡献四个工具。**未安装 MCP Server 时插件照常安装、启动与使用**（依赖在 `plugin.yaml` 中以 `mcp-server?` 声明为可选），只是这四个工具不会出现。
+
+| 工具（本地名） | 类型 | 参数 | 说明 |
+| --- | --- | --- | --- |
+| `wechat_sync_preview` | 只读 | `postName` | **获取预览信息**：按与同步一致的规则美化正文，返回美化后的正文 HTML、上传后实际使用的标题（64 字上限）、摘要（120 字）、作者（8 字）、原文链接（阅读原文）与留言设置，以及因超过微信长度上限被截断的字段名；不调用微信接口、不写任何数据，可反复调用 |
+| `wechat_sync_submit` | 写操作 | `postName` | **提交同步到微信**：先做提交前预检（微信配置、封面图、文章是否正在同步中），通过后创建后台同步任务并立即返回；同步时封面与正文图片会自动转存到微信素材库、正文按公众号排版美化，完成后可在公众号草稿箱看到草稿 |
+| `wechat_sync_status` | 只读 | `postName` | **查询同步状态**：返回该文章最近一次同步的状态与说明——`PENDING`（已提交、正在后台执行）/ `SUCCESS`（已写入公众号草稿箱）/ `FAILED`（失败，`message` 为微信返回的失败原因）/ `NONE`（尚未同步过）；只读取任务记录，不调用微信接口、不写任何数据，提交同步后可用它轮询结果 |
+| `wechat_cache_cleanup` | 写操作 | 无 | **清理素材缓存**：立即执行一次素材缓存清理（与每天 0 点的计划任务同一套规则），返回本次删除条数与生效的保留策略——`deletedRecords`（删除条数）、`remainingRecords`（剩余记录数）、`retentionDays`（保留策略：天数或 `never`）、`cutoff`（判定时间）；只删除「超过保留期且最近未被使用」的记录，仍被复用的缓存不会误删，也不影响每天 0 点的自动清理 |
+
+前三个工具只接收一个参数 `postName`（文章的 `metadata.name`），内部按与 Console 完全一致的规则取用文章字段（标题、摘要、封面、作者、原文链接、渲染后的正文），因此 MCP 调用的效果与在 Console 点「同步到微信公众号」相同；`wechat_cache_cleanup` 不需要参数。
+
+**启用方式**
+
+1. 在 Halo 应用市场安装并启用 **MCP Server** 插件（`mcp-server`，`>=1.0.0 & <2.0.0`）：商店页面 <https://www.halo.run/store/apps/app-ybv96zol>；
+2. 在「工具 → MCP 服务」的**访问密钥**中，把这四个工具（按需选择）勾选进该密钥可用的工具列表——**新贡献的工具不会自动加入已有密钥**，需管理员手动选择；
+3. 用该密钥在 MCP 客户端调用 `tools/list` / `tools/call`。
+
+**说明**
+
+- 工具名由 MCP Server 按插件归属自动拼接为协议名，调用时以 `tools/list` 返回的名称为准：`编码后的插件 ID` + `__` + `本地工具名`，例如 `plugin-wechat-official-sync__wechat_sync_preview`。其中 `__` 是 MCP Server 的**固定分隔符**（双下划线），与本地工具名里的单下划线（`wechat_sync_preview` 的 `_`）是两回事——插件 ID 里的 `-` 属白名单字符会原样保留，其余字符（下划线、点、中文等）会被转义成 `_hhhhhh`，因此 `__` 在协议名中不会产生歧义；
+- 四个工具都声明了 `inputSchema` 与 `outputSchema`：MCP Server 会在调用前校验参数、在**成功返回**后按 `outputSchema` 校验结构化结果（失败结果不参与该校验），因此工具的输出字段是稳定契约；
+- 权限回调要求调用方**已认证**（MCP 访问密钥归属某个 Halo 用户），匿名调用会被拒绝；更细的授权通过「角色 - 微信公众号同步 - 发布到微信公众号」与访问密钥的工具白名单控制（读取 AppSecret 等仍只发生在插件服务端内部）；
+- `wechat_sync_submit` 是**异步**的：返回 `PENDING` 表示任务已落库并在后台执行，用 `wechat_sync_status` 轮询即可拿到最终结果（与文章列表状态列同源）；同一篇文章在「同步中」时重复提交会被拒绝（错误码 `CONFLICT`），预检不通过时返回 `PRECONDITION_FAILED` 且不会产生任务记录；
+- `wechat_cache_cleanup` 与「缓存清理计划任务」共用同一套清理逻辑：「保留天数」在每次执行时读取（与插件设置一致，改完无需重启），设为「全部保留」时不做删除（返回 `deletedRecords: 0`、`retentionDays: "never"`、`cutoff: ""`）；
+- 返回给 MCP 客户端的错误使用稳定错误码：`INVALID_ARGUMENT`（参数不合法）、`NOT_FOUND`（文章不存在）、`CONFLICT`（正在同步中）、`PRECONDITION_FAILED`（预检未通过）、`INTERNAL_ERROR`（其它异常，详情见服务端日志）。
+
 ## 开发
 
 ```bash
@@ -488,7 +517,7 @@ pnpm dev
 
 ## 技术栈
 
-- **后端**：Java 21、Spring WebFlux（响应式 `WebClient`）、Halo Plugin API、[jsoup](https://jsoup.org)（解析正文 HTML、注入内联样式美化排版）、[TwelveMonkeys ImageIO WebP](https://github.com/haraldk/TwelveMonkeys)（webp 解码）、[SQLite JDBC](https://github.com/xerial/sqlite-jdbc)（素材上传结果缓存）
+- **后端**：Java 21、Spring WebFlux（响应式 `WebClient`）、Halo Plugin API、[jsoup](https://jsoup.org)（解析正文 HTML、注入内联样式美化排版）、[TwelveMonkeys ImageIO WebP](https://github.com/haraldk/TwelveMonkeys)（webp 解码）、[SQLite JDBC](https://github.com/xerial/sqlite-jdbc)（素材上传结果缓存）、Halo MCP Server API（`run.halo.mcpserver:api`，**仅编译期依赖**，可选集成见 [MCP 工具](#mcp-工具可选需安装-mcp-server-插件)）
 - **前端**：Vue 3、TypeScript、Vite、`@halo-dev/components`、`@halo-dev/api-client`、unplugin-icons
 - **构建**：Gradle + `run.halo.plugin.devtools`、pnpm
 

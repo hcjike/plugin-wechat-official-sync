@@ -8,6 +8,10 @@ metadata:
 spec:
   enabled: true
   requires: ">=2.26.0"
+  # 「?」表示可选依赖：安装了 MCP Server 时贡献「获取微信同步预览 / 提交同步到微信」两个 MCP 工具，
+  # 未安装时插件照常安装、启动与使用（Halo 也据此安排插件加载顺序）
+  pluginDependencies:
+    mcp-server?: ">=1.0.0 & <2.0.0"
   author:
     name: 宏尘极客
     website: https://www.hcjike.com

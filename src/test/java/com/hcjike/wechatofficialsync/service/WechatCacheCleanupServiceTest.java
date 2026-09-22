@@ -164,6 +164,54 @@ class WechatCacheCleanupServiceTest {
         assertThatCode(() -> service.schedule("* * * * * *")).doesNotThrowAnyException();
     }
 
+    @Test
+    void cleanupNowDeletesExpiredRecordsAndReportsRetentionAndCounts() {
+        plan("15");
+        saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(20)));
+        saveUsedAt(ACTIVE_FINGERPRINT, Instant.now().minus(Duration.ofDays(3)));
+
+        WechatCacheCleanupService.CleanupResult result = service.cleanupNow().block();
+
+        assertThat(result).isNotNull();
+        assertThat(result.deletedRecords()).isEqualTo(1L);
+        assertThat(result.remainingRecords()).isEqualTo(1L);
+        assertThat(result.retentionDays()).isEqualTo("15");
+        // 判定时间即「保留期之前」的那个时间点：早于它未使用的记录被删除
+        assertThat(Instant.parse(result.cutoff()))
+            .isBefore(Instant.now().minus(Duration.ofDays(14)))
+            .isAfter(Instant.now().minus(Duration.ofDays(16)));
+    }
+
+    @Test
+    void cleanupNowKeepsEverythingAndReportsNeverWhenRetentionIsNever() {
+        plan(WechatSetting.CACHE_RETENTION_NEVER);
+        saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(999)));
+
+        WechatCacheCleanupService.CleanupResult result = service.cleanupNow().block();
+
+        assertThat(result).isNotNull();
+        assertThat(result.deletedRecords()).isZero();
+        assertThat(result.remainingRecords()).isEqualTo(1L);
+        assertThat(result.retentionDays()).isEqualTo(WechatSetting.CACHE_RETENTION_NEVER);
+        // 没有判定时间（不做删除），但字段仍在，便于调用方统一解析
+        assertThat(result.cutoff()).isEmpty();
+        assertThat(find(FINGERPRINT)).isNotNull();
+    }
+
+    @Test
+    void cleanupNowUsesDefaultRetentionWhenSettingMissing() {
+        when(settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)).thenReturn(Mono.empty());
+        saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(40)));
+
+        WechatCacheCleanupService.CleanupResult result = service.cleanupNow().block();
+
+        assertThat(result).isNotNull();
+        assertThat(result.retentionDays())
+            .isEqualTo(String.valueOf(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS));
+        assertThat(result.deletedRecords()).isEqualTo(1L);
+        assertThat(result.remainingRecords()).isZero();
+    }
+
     /** 预置设置：只保留「缓存保留天数」（{@code null} 表示留空）。 */
     private void plan(String retentionDays) {
         when(settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class))
