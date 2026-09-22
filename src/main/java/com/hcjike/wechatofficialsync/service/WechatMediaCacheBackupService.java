@@ -3,6 +3,7 @@ package com.hcjike.wechatofficialsync.service;
 import com.hcjike.wechatofficialsync.cache.MediaCacheBackup;
 import com.hcjike.wechatofficialsync.cache.WechatMediaCacheStore;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.concurrent.ScheduledFuture;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -21,6 +22,10 @@ import org.springframework.stereotype.Service;
  * <p><b>线程与生命周期</b>：自带一个单线程调度器，由插件在 {@code start()} / {@code stop()} 中显式启停。
  * 停止时必须关掉它：调度线程若跨插件生命周期存活，会牵住插件的类加载器，导致热重载/卸载后旧类无法回收。
  * 备份执行体运行在调度线程（普通线程，非 Reactor 事件循环线程）上，因此可以直接阻塞等待建库与备份。</p>
+ *
+ * <p><b>「1 点」按运行环境的系统时区解释</b>：注册时把 {@link ZoneId#systemDefault()} 显式交给
+ * {@link CronTrigger}，因此每天 1 点指宿主机（JVM）本地时间的 1 点，而不是固定的 UTC 1 点；
+ * 部署在容器里时，只要容器的系统时区设置正确，任务就会在本地 1 点触发。</p>
  *
  * @author hcjike
  * @since 1.0.0
@@ -96,15 +101,17 @@ public class WechatMediaCacheBackupService {
         if (previous != null) {
             previous.cancel(false);
         }
+        // 显式绑定「当前系统时区」：cron 里的 1 点指本地时间 1 点，避免被当成 UTC（部署在容器里时尤其重要）
+        ZoneId zone = ZoneId.systemDefault();
         try {
-            scheduledTask = current.schedule(this::runBackup, new CronTrigger(cron));
+            scheduledTask = current.schedule(this::runBackup, new CronTrigger(cron, zone));
         } catch (RuntimeException e) {
             // 调度器已在关闭途中（如插件停止）：此时注册失败可忽略，下次启动会重新注册
             log.warn("媒体缓存备份计划任务注册失败（cron「{}」，调度器可能已关闭）：{}", cron, e.getMessage());
             return;
         }
-        log.info("媒体缓存备份计划任务已注册：cron「{}」，每次备份保留最新 {} 份", cron,
-            MediaCacheBackup.KEEP);
+        log.info("媒体缓存备份计划任务已注册：cron「{}」（时区「{}」），每次备份保留最新 {} 份", cron,
+            zone.getId(), MediaCacheBackup.KEEP);
     }
 
     /**
