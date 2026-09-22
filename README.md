@@ -384,7 +384,7 @@ Console 侧：点击「同步到微信公众号」后先调用 `POST /validate` 
 写入同步任务记录（`WechatSyncTask` 自定义模型：PENDING / SUCCESS / FAILED + 任务输入快照）
 ```
 
-- 同步任务与状态持久化为名为 `WechatSyncTask` 的 Halo 自定义模型（每篇文章一条，保存在 Halo 数据库中），供文章列表渲染状态列；任务落到成功/失败终态后会清空正文输入快照，不长期占用数据库空间。
+- 同步任务与状态持久化为名为 `WechatSyncTask` 的 Halo 自定义模型（每篇文章一条，保存在 Halo 数据库中），供文章列表渲染状态列；任务落到成功/失败终态后会清空正文输入快照，不长期占用数据库空间。任务记录上另留一份**提交时的文章标题**（`spec.postTitle`），清空快照后仍能在扩展记录里认出这条任务属于哪篇文章（文章 `name` 是 Halo 生成的随机串，单看它认不出文章）。
 - 文章列表在存在「同步中」记录时会自动轮询状态（约每 5 秒一次，单轮最长 30 分钟），直到任务变为成功或失败；低带宽 + 大量图片的长耗时同步同样会刷新到最终结果。
 - 支持同时同步多篇文章：各任务相互独立、并发执行；任务记录独立更新（带乐观锁冲突重试），多篇文章同时完成也不会互相覆盖状态。
 - 同一篇文章在「同步中」时重复提交会被拒绝（返回 `409`；点击同步时的预检也会提前拦截并提示），避免重复上传素材与重复创建草稿。
@@ -630,7 +630,7 @@ Halo 会为每种自定义模型建立内存索引（`metadata.name`、创建/�
 
 - `Start to initialize indices for type: …WechatSyncTask, prefix: /registry/api.wechat-sync.halo.run/wechatsynctasks`：开始为哪个模型建索引、扫描哪段存储（前缀由模型的 `@GVK` 推导）；
 - `Total indexed count: 9`：本次扫描并送入索引的任务记录数。任务是一篇文章一条（任务名规则 `wechat-sync-<文章 name>`），所以这个数字约等于**曾经提交过同步的文章数**（成功与失败记录都会保留）；
-- `StopWatch 'Initialize indices for …WechatSyncTask'` 与下方的耗时表：`Indexing from @start` 是**第一批**（从头扫，每批 100 条），`Indexing from /registry/…/wechat-sync-e0248eaf-…` 是**从上一批最后一条记录之后继续**——那串就是本插件的任务名，文章 `name` 是 Halo 生成的随机串，看起来像 UUID；由于循环要再取一次空批才能确认结束，100 条以内固定会看到 2 行批次。
+- `StopWatch 'Initialize indices for …WechatSyncTask'` 与下方的耗时表：`Indexing from @start` 是**第一批**（从头扫，每批 100 条），`Indexing from /registry/…/wechat-sync-e0248eaf-…` 是**从上一批最后一条记录之后继续**——那串就是本插件的任务名，文章 `name` 是 Halo 生成的随机串，看起来像 UUID（任务记录里的 `spec.postTitle` 保存了提交时的文章标题，可据此对应回文章）；由于循环要再取一次空批才能确认结束，100 条以内固定会看到 2 行批次。
 
 每次插件启动或热重载（重新注册模型）都会看到这组日志，耗时与任务记录条数相关，通常只有几毫秒。若它随时间明显变长，可从「任务记录条数」入手排查——文章被永久删除时对应任务会被自动清理、任务落到终态后也会清空正文快照，因此不会无限增长。
 

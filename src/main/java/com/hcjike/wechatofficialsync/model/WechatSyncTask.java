@@ -17,6 +17,9 @@ import run.halo.app.extension.GVK;
  * 重复提交即重置同一条记录。任务落到终态（SUCCESS / FAILED）后输入快照会被清空，
  * 避免正文 HTML 长期占用数据库空间。快照只包含文章输入，不含任何微信凭据。</p>
  *
+ * <p>另在 spec 上单独留一份提交时的文章标题（{@link WechatSyncTaskSpec#getPostTitle()}）：输入快照落终态
+ * 后会被清空，标题独立保存才能在任务记录里长期认出「这条任务是哪篇文章」。</p>
+ *
  * <p>类名与 kind 均以 {@code WechatSync} 前缀命名，避免与其他插件注册的同名模型冲突。</p>
  *
  * @author hcjike
@@ -37,6 +40,16 @@ public class WechatSyncTask extends AbstractExtension {
 
         /** 归属的文章 name（Halo {@code Post} 的 {@code metadata.name}），也是状态下发的键。 */
         private String postName;
+
+        /**
+         * 提交时文章标题的留存副本（即当次同步实际使用的草稿标题，超长时已按微信上限截断），
+         * 便于在任务记录里直接看出「这条任务属于哪篇文章」——文章 name 是 Halo 生成的随机串，
+         * 单看它认不出文章。
+         *
+         * <p>与 {@link #request} 分开保存：输入快照在任务落到终态（SUCCESS / FAILED）后会被清空
+         * （避免正文 HTML 长期占用数据库空间），标题留在 spec 上才不会随之丢失。</p>
+         */
+        private String postTitle;
 
         /**
          * 任务状态：{@link SyncRecord#STATUS_PENDING} / {@link SyncRecord#STATUS_SUCCESS}
