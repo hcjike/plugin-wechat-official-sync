@@ -5,6 +5,7 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 
 import java.awt.image.BufferedImage;
 import java.io.ByteArrayOutputStream;
@@ -140,14 +141,33 @@ class WechatMpClientTest {
     @Test
     void addDraftFailsWhenResponseHasNoMediaId() {
         server.plan("{\"errcode\":45009,\"errmsg\":\"reach max quota\"}");
-        assertThatThrownBy(() -> client.addDraft(server.baseUrl(), "TOKEN", Map.of("title", "hello")).block())
-            .isInstanceOf(WechatApiException.class)
-            .hasMessageContaining("创建公众号草稿失败");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.addDraft(server.baseUrl(), "TOKEN", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        // 错误码要带出来：调用方据此决定是否补救（如 40007 时重传封面后再试）
+        assertThat(error).hasMessageContaining("创建公众号草稿失败");
+        assertThat(error.getErrcode()).isEqualTo("45009");
+        assertThat(error.isInvalidMediaId()).isFalse();
+    }
+
+    @Test
+    void addDraftErrorCarriesInvalidMediaIdErrcode() {
+        // 封面素材已在微信侧失效：draft/add 以 40007 invalid media_id 拒绝
+        server.plan("{\"errcode\":40007,\"errmsg\":\"invalid media_id hint: [abc]\"}");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.addDraft(server.baseUrl(), "TOKEN", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        assertThat(error).hasMessageContaining("创建公众号草稿失败");
+        assertThat(error.isInvalidMediaId()).isTrue();
     }
 
     @Test
     void permanentImageUploadReturnsMediaIdAndImageUrl() {
-        // 图片类型的 add_material 会同时返回 media_id 与素材图片 url；后者用于复用缓存前校验素材是否还在
+        // 图片类型的 add_material 会同时返回 media_id 与素材图片 url（url 仅留档：素材被删后它往往仍可访问）
         server.plan("{\"media_id\":\"COVER_MEDIA_ID\",\"url\":\"https://mmbiz.qpic.cn/mmbiz_jpg/cover.jpg\"}");
 
         WechatMpClient.PermanentImage image =
@@ -280,7 +300,7 @@ class WechatMpClientTest {
         assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/gone2.png").block())
             .isEqualTo(WechatMpClient.ImageAvailability.MISSING);
 
-        // 其余状态（如 CDN 不支持 HEAD 返回 405、服务端错误）给不出确定结论：交由调用方保守处理
+        // 其余状态（如 CDN 不支持 HEAD 返回 405、服务端错误）给不出确定结论：交由调用方按不可信处理
         server.planStatus(405, "");
         assertThat(client.checkImageAvailability(server.baseUrl() + "/mmbiz/unsupported.png").block())
             .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
@@ -298,10 +318,11 @@ class WechatMpClientTest {
     }
 
     @Test
-    void permanentImageExistsOnlyForExplicitInvalidMediaId() {
+    void materialAvailabilityIsDecidedByResponse() {
         // 素材仍在：get_material 返回图片二进制流
         server.plan("PNG-BINARY-BYTES");
-        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "MEDIA-1").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.AVAILABLE);
         RecordedRequest request = server.lastRequest();
         assertThat(request.uri())
             .contains("/cgi-bin/material/get_material")
@@ -310,23 +331,33 @@ class WechatMpClientTest {
 
         // 微信明确回 40007：素材确实不存在
         server.plan("{\"errcode\":40007,\"errmsg\":\"invalid media_id\"}");
-        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-GONE").block()).isFalse();
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "MEDIA-GONE").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.MISSING);
     }
 
     @Test
-    void permanentImageExistsTreatsOtherFailuresAsStillAvailable() {
-        // 回归用例：代理没有转发 get_material 时，返回的很可能是代理自己的报文/状态码，
-        // 绝不能据此判定素材不存在——否则有效缓存会被误判失效，导致素材被反复重复上传
+    void materialAvailabilityIsUnknownForInconclusiveResponses() {
+        // 代理没转发 get_material 时返回的是代理自己的报文/状态码：既不能说「已失效」（会把有效缓存误重传），
+        // 也不能说「仍在」（会放过已失效的素材），只能如实回「给不出结论」，由调用方决定怎么处置
         server.planStatus(404, "<html>404 Not Found</html>");
-        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "MEDIA-1").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
 
         server.plan("{\"errcode\":-1,\"errmsg\":\"system error\"}");
-        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "MEDIA-1").block()).isTrue();
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "MEDIA-1").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
 
-        // 连不上/被拦截等失败同样按「仍可用」处理
-        assertThat(client.permanentImageExists("http://127.0.0.1:1", "TOKEN", "MEDIA-1").block()).isTrue();
-        // 没有 media_id 可校验：不给出否定结论
-        assertThat(client.permanentImageExists(server.baseUrl(), "TOKEN", "  ").block()).isTrue();
+        // 2xx 但响应体为空：同样拿不到任何证据
+        server.planStatus(200, "");
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "MEDIA-1").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
+
+        // 连不上/被拦截等失败
+        assertThat(client.checkMaterialAvailability("http://127.0.0.1:1", "TOKEN", "MEDIA-1").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
+        // 没有 media_id 可校验
+        assertThat(client.checkMaterialAvailability(server.baseUrl(), "TOKEN", "  ").block())
+            .isEqualTo(WechatMpClient.ImageAvailability.UNKNOWN);
     }
 
     @Test
