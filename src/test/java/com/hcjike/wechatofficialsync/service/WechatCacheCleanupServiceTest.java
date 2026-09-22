@@ -86,16 +86,6 @@ class WechatCacheCleanupServiceTest {
     }
 
     @Test
-    void keepsEverythingWhenRetentionIsNever() {
-        plan(WechatSetting.CACHE_RETENTION_NEVER);
-        saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(999)));
-
-        service.runCleanup();
-
-        assertThat(find(FINGERPRINT)).isNotNull();
-    }
-
-    @Test
     void usesDefaultRetentionWhenSettingMissing() {
         // 设置组缺失（如尚未保存过配置）：按默认 30 天处理
         when(settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)).thenReturn(Mono.empty());
@@ -115,23 +105,44 @@ class WechatCacheCleanupServiceTest {
     }
 
     @Test
-    void retentionDaysFallBackToDefaultWhenMissingOrInvalid() {
+    void retentionDaysResolvesPositiveDaysAndKeepAllMarkers() {
+        // 正数＝保留天数（忽略首尾空白）；表单是数字输入，兼容 30.0 这类小数写法
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting(" 90 "))).isEqualTo(90);
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("365"))).isEqualTo(365);
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("30.0"))).isEqualTo(30);
+
+        // 留空 / 0 / 负数＝全部保留（null）
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(new WechatSetting())).isNull();
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("   "))).isNull();
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("0"))).isNull();
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("-7"))).isNull();
+    }
+
+    @Test
+    void unresolvableRetentionDaysFallBackToDefault() {
+        // 设置组缺失（如尚未保存过配置）与取值无法识别时，都按默认 30 天处理
+        // （保留策略只有「天数」与「留空/0/负数的全部保留」两类，其余取值一律按默认天数）
         assertThat(WechatCacheCleanupService.resolveRetentionDays(null))
-            .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(new WechatSetting()))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
         assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("mystery")))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
-        // 0 / 负数不是合法保留期，同样按默认处理
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("0")))
+        // 保留策略里没有「never」这个取值（它只是清理结果中「全部保留」的输出标识），按无法识别处理
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("never")))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("-7")))
-            .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
+    }
 
-        // 正常取值：忽略首尾空白；never（大小写不敏感）表示全部保留
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting(" 90 "))).isEqualTo(90);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("365"))).isEqualTo(365);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("NEVER"))).isNull();
+    @Test
+    void keepsEverythingWhenRetentionIsBlankOrNegative() {
+        // 留空＝全部保留：再久没用过的记录也不删
+        plan(" ");
+        saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(999)));
+        service.runCleanup();
+        assertThat(find(FINGERPRINT)).isNotNull();
+
+        // 负数＝全部保留
+        plan("-1");
+        service.runCleanup();
+        assertThat(find(FINGERPRINT)).isNotNull();
     }
 
     @Test
@@ -183,8 +194,8 @@ class WechatCacheCleanupServiceTest {
     }
 
     @Test
-    void cleanupNowKeepsEverythingAndReportsNeverWhenRetentionIsNever() {
-        plan(WechatSetting.CACHE_RETENTION_NEVER);
+    void cleanupNowKeepsEverythingAndReportsKeepAllMarkerWhenRetentionNotSet() {
+        plan("-1");
         saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(999)));
 
         WechatCacheCleanupService.CleanupResult result = service.cleanupNow().block();
@@ -192,7 +203,8 @@ class WechatCacheCleanupServiceTest {
         assertThat(result).isNotNull();
         assertThat(result.deletedRecords()).isZero();
         assertThat(result.remainingRecords()).isEqualTo(1L);
-        assertThat(result.retentionDays()).isEqualTo(WechatSetting.CACHE_RETENTION_NEVER);
+        // 「全部保留」在清理结果（MCP 工具输出）中以固定的策略标识呈现
+        assertThat(result.retentionDays()).isEqualTo(WechatCacheCleanupService.RETENTION_KEEP_ALL);
         // 没有判定时间（不做删除），但字段仍在，便于调用方统一解析
         assertThat(result.cutoff()).isEmpty();
         assertThat(find(FINGERPRINT)).isNotNull();

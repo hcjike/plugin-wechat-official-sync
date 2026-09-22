@@ -103,6 +103,16 @@ public final class WechatContentBeautifier {
     private static final String[] DEFAULT_HEADING_COLORS =
         {"#222222", "#222222", "#222222", "#222222", "#333333", "#888888"};
 
+    /** H1 对齐方式未配置或非法时的内置默认值（居中）。 */
+    private static final String DEFAULT_H1_ALIGN = BeautifySetting.H1_ALIGN_CENTER;
+
+    /**
+     * 内联样式中的 {@code text-align} 声明（负向后行断言避免匹配到 {@code text-align-last} 等同类属性），
+     * 用于判断标题是否已自带对齐方式，从而不覆盖原有对齐。
+     */
+    private static final Pattern STYLE_TEXT_ALIGN =
+        Pattern.compile("(?<![-a-zA-Z])text-align\\s*:", Pattern.CASE_INSENSITIVE);
+
     /** 仅接受 3/6/8 位十六进制颜色，避免把非法值写进 style 破坏样式。 */
     private static final Pattern HEX_COLOR =
         Pattern.compile("#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})");
@@ -302,7 +312,7 @@ public final class WechatContentBeautifier {
      * 美化正文 HTML：注入内联样式并做基础安全清理。入参为空或异常时原样返回，绝不阻断同步流程。
      *
      * @param html   Halo 渲染并经图片转存后的正文 HTML
-     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、表格宽度模式、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
+     * @param config 美化配置（引用块边框开关/边框色/背景色、标题边框开关与 H2–H6 逐级边框色、H1 对齐方式、H1–H6 与正文/链接/行内代码颜色、折叠块标题/内容背景色与边框颜色、表格宽度模式、分栏卡片版式与画廊版式）；为 {@code null} 时用内置默认值
      * @return 适配微信编辑模式的内联样式 HTML
      */
     public static String beautify(String html, BeautifySetting config) {
@@ -1029,10 +1039,15 @@ public final class WechatContentBeautifier {
         String linkColor = color(cfg.getLinkColor(), DEFAULT_LINK_COLOR);
         String inlineCodeColor = color(cfg.getInlineCodeColor(), DEFAULT_INLINE_CODE_COLOR);
         String inlineCodeBgColor = color(cfg.getInlineCodeBgColor(), DEFAULT_INLINE_CODE_BG_COLOR);
-        // 「标题显示边框」开启后，H2–H6 各自加左侧强调边框（H1 居中不加），每级边框色独立配置
+        // 「标题显示边框」开启后，H2–H6 各自加左侧强调边框（H1 不加），每级边框色独立配置
         boolean headingBorder = cfg.isHeadingBorderEnabled();
-        applyAll(body, "h1", headingStyle("font-size:22px;text-align:center;margin:1.4em 0 0.9em;",
-            color(cfg.getH1Color(), DEFAULT_HEADING_COLORS[0]), ""));
+        // H1 对齐方式可配（左/居中/右）：逐元素处理——正文 H1 已自带对齐方式（内联 text-align 或
+        // align 属性）时保持原样，仅对未自带对齐的 H1 写入配置的对齐
+        String h1Align = h1Align(cfg.getH1Align());
+        for (Element h1 : body.select("h1")) {
+            applyStyle(h1, headingStyle("font-size:22px;" + h1AlignCss(h1, h1Align)
+                + "margin:1.4em 0 0.9em;", color(cfg.getH1Color(), DEFAULT_HEADING_COLORS[0]), ""));
+        }
         applyAll(body, "h2", headingStyle("font-size:19px;margin:1.6em 0 0.9em;",
             color(cfg.getH2Color(), DEFAULT_HEADING_COLORS[1]),
             headingBorderCss(headingBorder, cfg.getH2BorderColor())));
@@ -1091,6 +1106,31 @@ public final class WechatContentBeautifier {
         return enabled
             ? "padding-left:12px;border-left:4px solid " + color(borderColor, DEFAULT_ACCENT) + ";"
             : "";
+    }
+
+    /**
+     * H1 的对齐声明：正文 H1 <b>未自带对齐方式</b>时按配置生成 {@code text-align:…}；已自带
+     * （内联样式含 {@code text-align}，或存在 {@code align} 属性——行内样式会覆盖该属性的效果）
+     * 时返回空串，保持原有对齐不变。与「默认样式在前、原有样式在后」的注入策略一致。
+     */
+    private static String h1AlignCss(Element h1, String align) {
+        if (STYLE_TEXT_ALIGN.matcher(h1.attr("style")).find() || h1.hasAttr("align")) {
+            return "";
+        }
+        return "text-align:" + align + ";";
+    }
+
+    /** 归一化 H1 对齐配置：仅接受 left/center/right（忽略大小写与首尾空白），其余（含缺省）回退默认居中。 */
+    private static String h1Align(String value) {
+        if (value != null) {
+            String trimmed = value.trim().toLowerCase(java.util.Locale.ROOT);
+            if (BeautifySetting.H1_ALIGN_LEFT.equals(trimmed)
+                || BeautifySetting.H1_ALIGN_CENTER.equals(trimmed)
+                || BeautifySetting.H1_ALIGN_RIGHT.equals(trimmed)) {
+                return trimmed;
+            }
+        }
+        return DEFAULT_H1_ALIGN;
     }
 
     /**

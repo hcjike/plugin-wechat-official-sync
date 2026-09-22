@@ -165,10 +165,11 @@ public class WechatMcpToolProvider implements McpToolProvider {
             .name(TOOL_CLEANUP)
             .title("清理素材缓存")
             .description("立即执行一次微信公众号素材缓存清理，返回本次清理条数与生效的保留策略"
-                + "（删除条数、清理后记录数、保留天数 / never、判定时间）。"
+                + "（删除条数、清理后记录数、保留策略、判定时间）。"
                 + "缓存记录的是「图片指纹 → 已上传到微信的素材」，用于避免同一张图重复上传、"
                 + "挤占微信素材库；清理只删除「超过保留期、且最近未被使用」的记录，"
-                + "仍在被复用的记录不会被误删（保留策略设为「全部保留」时不做任何删除）。"
+                + "仍在被复用的记录不会被误删（插件设置里「缓存保留天数」留空、0 或负数即「全部保留」，"
+                + "此时不做任何删除）。"
                 + "本工具不影响每天 0 点自动执行的清理计划。")
             .displayTitle("清理素材缓存")
             .displayDescription("立即清理超过保留期且最近未被使用的素材缓存记录，并返回清理条数与保留策略。")
@@ -269,7 +270,9 @@ public class WechatMcpToolProvider implements McpToolProvider {
 
     /**
      * 缓存清理工具的输出结构：与 {@link WechatMcpSyncService#cleanupCache()} 返回的字段一一对应。
-     * 四个字段在任何情况下都存在——「全部保留」时 {@code deletedRecords} 为 0、{@code cutoff} 为空串，
+     * 四个字段在任何情况下都存在——「全部保留」时 {@code deletedRecords} 为 0、{@code cutoff} 为空串、
+     * {@code retentionDays} 取「全部保留」的策略标识
+     * （{@link com.hcjike.wechatofficialsync.service.WechatCacheCleanupService#RETENTION_KEEP_ALL}），
      * 因此 {@code required} 不会因保留策略不同而校验失败。
      */
     private static Map<String, Object> cacheCleanupOutputSchema() {
@@ -281,7 +284,8 @@ public class WechatMcpToolProvider implements McpToolProvider {
                 "remainingRecords", Map.of("type", "integer",
                     "description", "清理后缓存库中的记录总数"),
                 "retentionDays", Map.of("type", "string",
-                    "description", "生效的缓存保留策略：天数（如 \"30\"）或 \"never\"（全部保留、不删除）"),
+                    "description", "生效的缓存保留策略：保留天数（如 \"30\"）；「全部保留」（插件设置里"
+                        + "「缓存保留天数」留空、0 或负数）时为 \"never\"，不做任何删除"),
                 "cutoff", Map.of("type", "string",
                     "description", "本次判定时间（早于该时间未使用的记录被删除，ISO-8601）；全部保留时为空串")),
             "required", List.of("deletedRecords", "remainingRecords", "retentionDays", "cutoff"));

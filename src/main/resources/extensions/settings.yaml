@@ -48,37 +48,12 @@ spec:
           label: 图片下载白名单
           help: 选填。默认拒绝下载内网/环回等受限地址的图片（防 SSRF）。内网部署导致同步失败时，可按行添加信任目标放行：域名、*.子域、IP 或 CIDR（如 192.168.0.0/16）。留空最安全。
           value: ""
-        - $formkit: select
+        - $formkit: number
           name: cacheRetentionDays
           id: cacheRetentionDays
           label: 缓存保留天数
-          value: "30"
-          options:
-            - value: "7"
-              label: 7 天
-            - value: "15"
-              label: 15 天
-            - value: "30"
-              label: 30 天
-            - value: "45"
-              label: 45 天
-            - value: "60"
-              label: 60 天
-            - value: "90"
-              label: 90 天
-            - value: "120"
-              label: 120 天
-            - value: "180"
-              label: 180 天
-            - value: "240"
-              label: 240 天
-            - value: "300"
-              label: 300 天
-            - value: "365"
-              label: 365 天
-            - value: "never"
-              label: 全部保留
-          help: 素材缓存会随同步不断累积，保留期之外的记录由每天 0 点的清理任务删除（清理时间固定，不可配置）。保留期按「最近一次使用时间」计算——某张图只要还会被同步命中，计时就会刷新，不会被误删；被清理的都是确实已不再使用的缓存。选「全部保留」则永久保留（数据库会持续增长）。
+          value: 30
+          help: 素材缓存会随同步不断累积，超过保留期且未被使用的记录由每天 0 点的清理任务删除（清理时间固定，不可配置）。保留期按「最近一次使用时间」计算——某张图只要还会被同步命中，计时就会刷新，不会被误删；被清理的都是确实已不再使用的缓存。填写保留天数（默认 30）；留空、0 或负数表示「全部保留」（数据库会持续增长）。
     - group: beautify
       label: 正文美化
       formSchema:
@@ -144,13 +119,26 @@ spec:
           id: headingBorderEnabled
           label: 标题显示边框
           value: false
-          help: 开启后 H2–H6 标题显示左侧强调边框（H1 居中不加边框），边框颜色由下方各级「标题边框颜色」决定
+          help: 开启后 H2–H6 标题显示左侧强调边框（H1 不加边框），边框颜色由下方各级「标题边框颜色」决定
         - $formkit: color
           name: h1Color
           label: 一级标题颜色
           help: H1 标题文字颜色
           value: "#222222"
           validation: required
+        - $formkit: select
+          name: h1Align
+          id: h1Align
+          label: 一级标题对齐方式
+          value: "center"
+          options:
+            - value: "left"
+              label: 左对齐
+            - value: "center"
+              label: 居中
+            - value: "right"
+              label: 右对齐
+          help: H1 标题的对齐方式，默认居中；若正文中的 H1 已自带对齐方式（行内 text-align 或 align 属性），则保持原样、本项对其不生效
         - $formkit: color
           name: h2Color
           label: 二级标题颜色

@@ -25,7 +25,8 @@ import run.halo.app.plugin.ReactiveSettingFetcher;
  * 「图片还在用、缓存却被删掉，下次同步又上传一遍」的情况。</p>
  *
  * <p><b>保留天数仍是插件设置</b>，且在<b>每次执行时</b>读取：改完设置无需重启插件，下一次清理即按新保留期
- * 生效；留空或取值非法时按 {@link #DEFAULT_RETENTION_DAYS} 天处理，「全部保留」则不删任何记录。</p>
+ * 生效；<b>留空、0 或负数</b>表示「全部保留」（不删任何记录），取值无法识别时按
+ * {@link #DEFAULT_RETENTION_DAYS} 天处理。</p>
  *
  * <p><b>也可主动触发</b>：{@link #cleanupNow()} 立即按同一套规则执行一次清理，并把清理条数与生效的保留策略
  * 返回给调用方（MCP 工具「清理素材缓存」即调用它），不影响每天 0 点的计划任务。</p>
@@ -51,6 +52,12 @@ public class WechatCacheCleanupService {
 
     /** 未配置（或取值非法）保留天数时使用的默认值（天）。 */
     static final int DEFAULT_RETENTION_DAYS = 30;
+
+    /**
+     * 清理结果中「全部保留」的策略标识：保留天数留空、0 或负数（即「全部保留」）时，
+     * {@link CleanupResult#retentionDays()} 取该值；MCP 工具「清理素材缓存」的输出契约以此为准。
+     */
+    public static final String RETENTION_KEEP_ALL = "never";
 
     /**
      * 清理计划任务的 cron 表达式：固定每天 0 点执行。
@@ -201,7 +208,7 @@ public class WechatCacheCleanupService {
     /** 汇总清理结果：生效的保留策略、判定时间、删除条数与清理后的记录总数。 */
     private Mono<CleanupResult> outcome(Integer retentionDays, long deletedRecords, Long cutoffMillis) {
         return store.count().map(remaining -> new CleanupResult(
-            retentionDays == null ? WechatSetting.CACHE_RETENTION_NEVER : String.valueOf(retentionDays),
+            retentionDays == null ? RETENTION_KEEP_ALL : String.valueOf(retentionDays),
             cutoffMillis == null ? "" : Instant.ofEpochMilli(cutoffMillis).toString(),
             deletedRecords,
             remaining));
@@ -210,7 +217,7 @@ public class WechatCacheCleanupService {
     /**
      * 一次缓存清理的结果。
      *
-     * @param retentionDays   生效的保留天数；{@link WechatSetting#CACHE_RETENTION_NEVER} 表示「全部保留」，
+     * @param retentionDays   生效的保留天数；{@link #RETENTION_KEEP_ALL} 表示「全部保留」，
      *                        该次不删除任何记录
      * @param cutoff          本次判定时间（早于该时间未使用的记录被删除），ISO-8601；全部保留时为空串
      * @param deletedRecords  本次删除的缓存记录数
@@ -223,27 +230,33 @@ public class WechatCacheCleanupService {
     /**
      * 解析缓存保留天数。
      *
-     * @param setting 当前插件设置，可为 {@code null}
+     * <p>表单是数字输入，语义为：<b>正数</b>＝保留天数（默认 30）；<b>留空、0 或负数</b>＝「全部保留」
+     * （不删除任何记录）；其余无法识别的取值按 {@link #DEFAULT_RETENTION_DAYS} 天处理。</p>
+     *
+     * @param setting 当前插件设置，可为 {@code null}（设置组缺失，按 {@link #DEFAULT_RETENTION_DAYS} 天处理）
      * @return 保留天数；{@code null} 表示「全部保留」（永久保留）
      */
     static Integer resolveRetentionDays(WechatSetting setting) {
-        String configured = setting == null ? null : setting.getCacheRetentionDays();
-        if (configured == null || configured.isBlank()) {
+        if (setting == null) {
             return DEFAULT_RETENTION_DAYS;
         }
-        String value = configured.trim();
-        if (WechatSetting.CACHE_RETENTION_NEVER.equalsIgnoreCase(value)) {
+        String configured = setting.getCacheRetentionDays();
+        if (configured == null || configured.isBlank()) {
+            // 留空＝全部保留
             return null;
         }
+        String value = configured.trim();
         try {
-            int days = Integer.parseInt(value);
-            if (days > 0) {
-                return days;
+            // 用 double 解析以兼容数字表单可能写回的 {@code 30.0} 这类小数写法
+            double days = Double.parseDouble(value);
+            if (days <= 0) {
+                // 0 与负数（按提示填的负数）＝全部保留
+                return null;
             }
-            log.warn("缓存保留天数「{}」不是正数，按默认 {} 天处理", configured, DEFAULT_RETENTION_DAYS);
+            return (int) Math.max(1, Math.round(days));
         } catch (NumberFormatException e) {
             log.warn("缓存保留天数「{}」无法识别，按默认 {} 天处理", configured, DEFAULT_RETENTION_DAYS);
+            return DEFAULT_RETENTION_DAYS;
         }
-        return DEFAULT_RETENTION_DAYS;
     }
 }
