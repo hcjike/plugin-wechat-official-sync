@@ -4,6 +4,7 @@ import com.hcjike.wechatofficialsync.service.WechatSyncService;
 import com.hcjike.wechatofficialsync.ssrf.SsrfGuard;
 import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
 import com.hcjike.wechatofficialsync.ssrf.SsrfSafeAddressResolverGroup;
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import com.twelvemonkeys.imageio.plugins.webp.WebPImageReaderSpi;
 import io.netty.channel.ChannelOption;
 import io.netty.handler.timeout.ReadTimeoutHandler;
@@ -179,6 +180,31 @@ public class WechatMpClient {
     }
 
     /**
+     * 把 WebClient 抛出的异常换成<b>去掉凭据</b>的 {@link WechatApiException}，供各接口调用链在末尾统一使用。
+     *
+     * <p>Spring 的 {@code WebClientResponseException} 默认把「请求方法 + 完整 URI（含查询串）」写进 message，
+     * 而本插件调用的微信接口 URI 查询串里带着 {@code access_token}（获取 token 的请求还带着
+     * {@code secret}=AppSecret）。这类 message 既会进服务端日志，也会被持久化为同步任务的失败原因
+     * （文章列表悬停展示、MCP 工具返回），因此必须在源头去掉查询串里的凭据。</p>
+     *
+     * <p>message 中没有敏感内容时<b>原样返回当前异常</b>：既不改变异常类型（调用方仍需按
+     * {@link WechatApiException#isInvalidMediaId()} 等判定），也不额外包装堆栈。</p>
+     */
+    static Throwable maskSecrets(Throwable error) {
+        String message = error.getMessage();
+        String masked = SensitiveText.mask(message);
+        if (message == null || masked.equals(message)) {
+            return error;
+        }
+        WechatApiException sanitized = error instanceof WechatApiException apiError
+            ? new WechatApiException(masked, apiError.getErrcode())
+            : new WechatApiException(masked);
+        // 保留原始异常作为 cause：日志里仍能看到底层原因（连接失败、网关 502 等）
+        sanitized.initCause(error);
+        return sanitized;
+    }
+
+    /**
      * 获取（并缓存）公众号全局 access_token。
      *
      * @param apiBase    已规范化的微信接口基址
@@ -210,7 +236,8 @@ public class WechatMpClient {
                     return Mono.just(token.toString());
                 }
                 return Mono.error(new WechatApiException("获取 access_token 失败：" + body));
-            });
+            })
+            .onErrorMap(WechatMpClient::maskSecrets);
     }
 
     /**
@@ -232,7 +259,8 @@ public class WechatMpClient {
                 .onStatus(HttpStatusCode::is3xxRedirection,
                     response -> Mono.error(new WechatApiException(
                         "已拒绝下载：目标发生重定向（" + SsrfGuard.describe(uri) + "），出于安全考虑不跟随")))
-                .bodyToMono(byte[].class));
+                .bodyToMono(byte[].class))
+            .onErrorMap(WechatMpClient::maskSecrets);
     }
 
     /**
@@ -314,7 +342,8 @@ public class WechatMpClient {
                 .uri(uri)
                 .exchangeToMono(response -> Mono.just(availabilityOf(response.statusCode().value()))))
             .onErrorResume(e -> {
-                log.warn("校验微信图片地址 [{}] 失败，无法判定：{}", url, e.getMessage());
+                log.warn("校验微信图片地址 [{}] 失败，无法判定：{}", SensitiveText.mask(url),
+                    SensitiveText.mask(e.getMessage()));
                 return Mono.just(ImageAvailability.UNKNOWN);
             });
     }
@@ -357,7 +386,8 @@ public class WechatMpClient {
                 .map(head -> materialAvailability(response.statusCode(), head))
                 .next())
             .onErrorResume(e -> {
-                log.warn("校验永久素材 [{}] 失败，无法判定：{}", mediaId, e.getMessage());
+                log.warn("校验永久素材 [{}] 失败，无法判定：{}", mediaId,
+                    SensitiveText.mask(e.getMessage()));
                 return Mono.just(ImageAvailability.UNKNOWN);
             });
     }
@@ -418,7 +448,8 @@ public class WechatMpClient {
                 Object errcode = body.get("errcode");
                 return Mono.error(new WechatApiException("创建公众号草稿失败：" + body,
                     errcode == null ? null : errcode.toString()));
-            });
+            })
+            .onErrorMap(WechatMpClient::maskSecrets);
     }
 
     /**
@@ -452,7 +483,8 @@ public class WechatMpClient {
                 .retrieve()
                 .bodyToMono(String.class)
                 .defaultIfEmpty("")
-                .map(this::parseMap));
+                .map(this::parseMap))
+            .onErrorMap(WechatMpClient::maskSecrets);
     }
 
     /**

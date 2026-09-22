@@ -1,6 +1,7 @@
 package com.hcjike.wechatofficialsync.client;
 
 import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpServer;
 import static org.assertj.core.api.Assertions.assertThat;
@@ -403,6 +404,43 @@ class WechatMpClientTest {
      * 断言上传报文里的图片已被转码为微信可接受的格式：字节不再是原始 WebP，且声明的文件名后缀与
      * 媒体类型都与转码后的真实字节一致（含透明通道转 png，否则转 jpg）。
      */
+    @Test
+    void masksCredentialsInWebClientExceptionMessages() {
+        // Spring 的 WebClientResponseException 会把「方法 + 完整 URI」写进 message：
+        // 微信接口查询串里的 access_token / secret 必须在源头被去掉（日志与任务记录都会用到它）
+        Throwable masked = WechatMpClient.maskSecrets(new IllegalStateException(
+            "403 Forbidden from POST https://api.weixin.qq.com/cgi-bin/draft/add?access_token=TOKEN-VALUE"));
+
+        assertThat(masked).isInstanceOf(WechatApiException.class);
+        assertThat(masked.getMessage()).contains("access_token=" + SensitiveText.MASK)
+            .doesNotContain("TOKEN-VALUE");
+        assertThat(masked.getCause()).isInstanceOf(IllegalStateException.class);
+    }
+
+    @Test
+    void keepsExceptionUnchangedWhenNothingToMask() {
+        IllegalStateException original =
+            new IllegalStateException("Connection refused: api.weixin.qq.com/1.2.3.4:443");
+
+        // 无敏感内容时不改变异常类型与实例：调用方仍按原始异常处理
+        assertThat(WechatMpClient.maskSecrets(original)).isSameAs(original);
+    }
+
+    @Test
+    void keepsErrcodeWhenMaskingWechatApiException() {
+        WechatApiException original = new WechatApiException(
+            "创建公众号草稿失败：https://api.weixin.qq.com/cgi-bin/draft/add?access_token=TOKEN-VALUE",
+            WechatApiException.INVALID_MEDIA_ID_ERRCODE);
+
+        Throwable masked = WechatMpClient.maskSecrets(original);
+
+        assertThat(masked).isInstanceOf(WechatApiException.class);
+        // errcode 必须保住：调用方据此决定「作废封面缓存并重传一次」
+        assertThat(((WechatApiException) masked).getErrcode())
+            .isEqualTo(WechatApiException.INVALID_MEDIA_ID_ERRCODE);
+        assertThat(masked.getMessage()).doesNotContain("TOKEN-VALUE");
+    }
+
     private static void assertTranscodedToWechatFormat(RecordedRequest request, byte[] original) {
         byte[] uploaded = request.partBytes();
         String magic = magicOf(uploaded);

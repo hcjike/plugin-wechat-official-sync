@@ -7,6 +7,7 @@ import com.hcjike.wechatofficialsync.config.WechatSetting;
 import com.hcjike.wechatofficialsync.content.WechatContentBeautifier;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
+import com.hcjike.wechatofficialsync.util.SensitiveText;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -584,14 +585,17 @@ public class WechatSyncService {
         if (url == null) {
             String reason = isBlank(cover)
                 ? "当前文章未设置封面图"
-                : "无法解析封面图地址「" + cover + "」（相对地址需先在 Halo 基本设置中配置「外部访问地址」）";
+                : "无法解析封面图地址「" + SensitiveText.mask(cover)
+                    + "」（相对地址需先在 Halo 基本设置中配置「外部访问地址」）";
             return Mono.error(new WechatApiException("微信公众号草稿必须包含封面图，但" + reason + "，请处理后重试"));
         }
         return wechatMpClient.download(url)
-            .onErrorMap(e -> new WechatApiException("封面图下载失败「" + url + "」：" + e.getMessage()))
+            .onErrorMap(e -> new WechatApiException("封面图下载失败「" + SensitiveText.mask(url) + "」："
+                + SensitiveText.mask(e.getMessage())))
             .flatMap(bytes -> {
                 if (bytes == null || bytes.length == 0) {
-                    return Mono.error(new WechatApiException("封面图下载内容为空「" + url + "」，请确认该地址可正常访问"));
+                    return Mono.error(new WechatApiException(
+                        "封面图下载内容为空「" + SensitiveText.mask(url) + "」，请确认该地址可正常访问"));
                 }
                 Mono<String> uploaded = refresh
                     ? mediaCacheService.reuploadPermanentImage(apiBase, appId, token, bytes,
@@ -600,7 +604,8 @@ public class WechatSyncService {
                         filenameFrom(url), url);
                 return uploaded
                     .onErrorMap(e -> !(e instanceof WechatApiException),
-                        e -> new WechatApiException("封面图上传到微信失败「" + url + "」：" + e.getMessage()));
+                        e -> new WechatApiException("封面图上传到微信失败「" + SensitiveText.mask(url) + "」："
+                            + SensitiveText.mask(e.getMessage())));
             });
     }
 
@@ -648,7 +653,8 @@ public class WechatSyncService {
                     .doOnNext(newSrc -> image.attr("src", newSrc))
                     .thenReturn(image)
                     .onErrorResume(e -> {
-                        log.warn("正文图片 [{}] 转存失败，保留原地址：{}", url, e.getMessage());
+                        log.warn("正文图片 [{}] 转存失败，保留原地址：{}", SensitiveText.mask(url),
+                            SensitiveText.mask(e.getMessage()));
                         return Mono.just(image);
                     });
             })
@@ -698,13 +704,15 @@ public class WechatSyncService {
         String url = resolveUrl(href, baseUrl);
         if (url == null) {
             // 相对地址且未配置「外部访问地址」：没有可下载的地址，直接退化为纯文本
-            log.info("正文附件「{}」无法解析为可下载的地址，不转存，改为{}", href, plainTextHint(showLinkContent));
+            log.info("正文附件「{}」无法解析为可下载的地址，不转存，改为{}", SensitiveText.mask(href),
+                plainTextHint(showLinkContent));
             showAsPlainText(link, href, showLinkContent);
             return Mono.empty();
         }
         if (!mayBeImage(url)) {
             // 非图片附件（/upload/x.pdf、x.zip 等）：连下载都省了，直接退化为纯文本
-            log.info("正文附件「{}」不是微信支持的图片格式，不转存，改为{}", href, plainTextHint(showLinkContent));
+            log.info("正文附件「{}」不是微信支持的图片格式，不转存，改为{}", SensitiveText.mask(href),
+                plainTextHint(showLinkContent));
             showAsPlainText(link, href, showLinkContent);
             return Mono.empty();
         }
@@ -720,8 +728,8 @@ public class WechatSyncService {
             // 下载 / 字节判定 / 上传任一环节失败都退回纯文本：
             // 留下微信不认的链接（外链在图文里不可点击）只会变成死链
             .onErrorResume(e -> {
-                log.warn("正文附件 [{}] 转存为微信图片失败，改为{}：{}", url, plainTextHint(showLinkContent),
-                    e.getMessage());
+                log.warn("正文附件 [{}] 转存为微信图片失败，改为{}：{}", SensitiveText.mask(url),
+                    plainTextHint(showLinkContent), SensitiveText.mask(e.getMessage()));
                 showAsPlainText(link, href, showLinkContent);
                 return Mono.empty();
             })

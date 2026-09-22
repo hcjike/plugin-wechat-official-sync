@@ -216,6 +216,21 @@ location ~ ^/cgi-bin/(token|media/uploadimg|material/add_material|material/get_m
 - 建议用 `location` 精确匹配上面 5 个路径、拒绝其它请求，防止代理被滥用；`material/get_material` 漏掉不会报错，但会让「封面复用」退化为每次都重传（见上文说明）。
 - 生产环境请为代理配置 `https://` 与合法证书；仅内网测试时可用 `http://`。
 
+### 代理侧的日志脱敏
+
+插件自身不会把 `access_token` / AppSecret 写进日志、异常消息与同步记录（见[日志与错误信息的脱敏](#日志与错误信息的脱敏)），但**反向代理服务器的访问日志（access log）默认会记录完整请求行**——`/cgi-bin/token?...&secret=...`、`/cgi-bin/draft/add?access_token=...` 这类带凭据的查询串会原样落到代理的日志文件里。这份日志属于代理的职责范围，插件无法代管，建议一并脱敏：
+
+```nginx
+# 只记录「方法 + 路径」，不记录查询串（access_token / secret 都在查询串里）
+log_format wechat_masked '$remote_addr - $remote_user [$time_local] "$request_method $uri" '
+                         '$status $body_bytes_sent "$http_referer" "$http_user_agent"';
+access_log /var/log/nginx/wechat-proxy.log wechat_masked;
+```
+
+- 默认的 `$request` / `$request_uri` 含完整请求行与查询串，改成 `$request_method $uri` 即可丢掉查询串；
+- 排障时若确实需要查询串，可临时切回默认格式，排查完再改回；也可用 `map` 只保留非敏感参数；
+- 同一台机器上的网关 / 负载均衡（Cloudflare、阿里云 SLB、Kong 等）的访问日志同理，建议关闭或对查询串脱敏。
+
 ## 微信接口错误码速查
 
 同步过程中任一步失败，失败原因会在文章列表的**红色微信 Logo 上悬停显示**，内容为插件请求微信后的原始结果（含 `errcode` / `errmsg`），服务端日志中也会记录。本节按插件实际调用的 5 个接口整理微信官方给出的**限制与接口级错误码**（其中 `material/get_material` 只用于**素材复用前的校验**，它出错**不会**让同步失败，判定规则见下方单独一节），再汇总**通用（全局）错误码**在本插件中的常见诱因，最后补充**未出现在全局返回码表 / 各接口文档只一笔带过**、但在同步场景里真实会遇到的错误码，以及非 `errcode` 类失败，便于对照排查。
@@ -388,6 +403,18 @@ Console 侧：点击「同步到微信公众号」后先调用 `POST /validate` 
 - 服务端通过 `ReactiveExtensionClient` 按名称读取该 `Secret`，在内存中解析出 AppSecret 后仅用于向微信换取 `access_token`；**不写入日志、异常消息、资源状态或任何持久化位置**。
 - 面向用户的角色模板（发布到微信公众号）**不授予** `Secret` 的读取权限，读取仅发生在插件服务端内部。
 - 同步任务记录（`WechatSyncTask`）只保存文章输入（标题、摘要、正文 HTML、封面地址等）与同步状态，**不包含 AppSecret 等任何凭据**。
+
+### 日志与错误信息的脱敏
+
+同步相关的失败原因会同时出现在服务端日志、任务记录（文章列表悬停展示）与 MCP 工具返回中，因此插件对可能携带凭据的文本做了统一脱敏：
+
+- **异常源头脱敏**：WebClient 的响应异常默认会把「请求方法 + 完整 URI（含查询串）」写进异常 message，而微信接口的查询串里带着 `access_token`（获取 token 的请求还带 `secret`）；插件在 `WechatMpClient` 中把这些异常统一换成脱敏后的消息，因此日志、异常堆栈、任务记录与 MCP 返回里都不会出现凭据（异常类型、`errcode` 与原始 cause 仍然保留）；
+- **落库前再兜一层**：`SyncRecord.failed(...)` 在持久化失败原因前再次脱敏，避免其它来源的文本把凭据写进任务记录；
+- **URL 脱敏**：图片 / 附件地址（可能带签名参数）在日志与错误消息中按 `sign=***` 处理，路径与其它的参数保留，便于定位问题；
+- **正文不入日志**：正文 HTML 属用户内容，日志与 MCP 调用日志中只记录长度、不记录内容；
+- **刻意不脱敏的字段**：`media_id` / `thumb_media_id` 是资源标识而非凭据，保留原值以便排查素材失效；`appid`、文章标题与 `postName` 同样保留。
+
+> 反向代理（Nginx / 1Panel / 网关）自身的访问日志默认会记录含 `access_token` 的完整查询串，需在代理侧另行处理，见[代理侧的日志脱敏](#代理侧的日志脱敏)。
 
 ### 出站图片下载的 SSRF 防护
 
