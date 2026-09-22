@@ -83,9 +83,6 @@ public class WechatMpClient {
     /** 下载图片的响应体上限，超出即中止，避免出站请求耗尽内存。 */
     private static final int MAX_DOWNLOAD_BYTES = 16 * 1024 * 1024;
 
-    /** 微信「不合法的媒体文件 id」错误码：{@code get_material} 只有返回它才说明素材真的不存在。 */
-    private static final String INVALID_MEDIA_ID_ERRCODE = "40007";
-
     /**
      * 校验素材是否存在时最多读取的响应体字节数：{@code get_material} 在素材存在时返回图片二进制流，
      * 只需读到足够判断「返回的是 JSON 还是图片」即可，没必要为一次校验把整张图拉回来。
@@ -259,9 +256,10 @@ public class WechatMpClient {
     /**
      * 上传永久图片素材（add_material），返回素材 id 与图片地址。
      *
-     * <p>微信对图片类型会同时返回 {@code url}（素材图片地址）。该地址用于后续复用缓存时校验素材是否还在：
-     * 它直连微信 CDN、<b>不经过插件设置的「接口地址」代理</b>，因此即便代理没有转发
-     * {@code material/get_material} 之类的接口，也能独立判断素材是否存在。</p>
+     * <p>微信对图片类型会同时返回 {@code url}（素材图片地址）。它只作留档排查用，<b>不能</b>用来判断素材
+     * 是否还在：素材在公众号后台被删除后这个地址往往仍然访问得到（地址是 CDN 上的图片副本，不等于素材库里
+     * 的条目），据此复用会拿到已失效的 {@code media_id}。判断素材是否还在请用
+     * {@link #checkMaterialAvailability(String, String, String)} 查 {@code media_id} 本身。</p>
      */
     public Mono<PermanentImage> uploadPermanentImage(String apiBase, String token, byte[] data,
         String filename) {
@@ -278,31 +276,36 @@ public class WechatMpClient {
             });
     }
 
-    /** 微信侧图片地址的可访问性判定结果。 */
+    /** 微信侧图片资源的可得性判定结果：图片地址（CDN）与永久图片素材（{@code media_id}）共用。 */
     public enum ImageAvailability {
 
-        /** 明确可访问（2xx）：资源还在。 */
+        /** 明确可得：地址返回 2xx / 已确证取回素材本体，资源还在。 */
         AVAILABLE,
 
-        /** 明确不可访问（404/410）：资源已被删除。 */
+        /** 明确不可得：地址 404、410 / 微信明确回 {@code 40007}，资源已被删除。 */
         MISSING,
 
         /**
-         * 无法得出结论：3xx/5xx、CDN 不支持 HEAD 返回的 405、网络异常、SSRF 拦截等。
-         * 调用方应按「无法确认」保守处理，不要据此判定失效。
+         * 给不出结论：3xx、5xx、CDN 不支持 HEAD 返回的 405、代理没转发该接口、限流、鉴权失败、
+         * 响应无法解析、空响应体、网络异常、SSRF 拦截等。
+         *
+         * <p>调用方按<b>不可信</b>处理：既不要据此认定资源仍在、也不要据此认定已失效——
+         * 本项目的处置是「不确定就重传」（见 {@code WechatMediaCacheService#reuseOrUpload}）。</p>
          */
         UNKNOWN
     }
 
     /**
-     * 校验微信侧图片地址是否仍可访问（复用缓存前调用）。
+     * 校验微信侧图片地址是否仍可访问（复用正文图片缓存前调用）。
      *
-     * <p>正文图片用 {@code uploadimg} 返回的图片地址，永久图片素材用 {@code add_material} 返回的素材图片
-     * 地址，两者都走本方法。地址是微信 CDN 上的公开地址，<b>不经过插件设置的「接口地址」代理</b>，
+     * <p>地址是 {@code uploadimg} 返回的微信 CDN 公开地址，<b>不经过插件设置的「接口地址」代理</b>，
      * 因此比任何经代理转发的接口都可靠。只发 HEAD（只要响应头，不把整张图下载回来）。</p>
      *
-     * <p>只有 2xx 判「存在」、{@code 404/410} 判「已删除」，其余状态码与请求失败一律返回
-     * {@link ImageAvailability#UNKNOWN}——判定不出来时不给出结论，由调用方保守处理。</p>
+     * <p>只有 2xx 判「存在」、{@code 404/410} 判「已删除」，其余状态码与请求失败一律
+     * {@link ImageAvailability#UNKNOWN}——不给出结论，由调用方决定怎么处置。</p>
+     *
+     * <p>永久图片素材不走本方法：它复用值是 {@code media_id}，地址可访问并不代表素材还在，
+     * 见 {@link #checkMaterialAvailability(String, String, String)}。</p>
      */
     public Mono<ImageAvailability> checkImageAvailability(String url) {
         return Mono.fromCallable(() -> SsrfGuard.validateAndResolve(url, ssrfPolicy.get()))
@@ -326,19 +329,22 @@ public class WechatMpClient {
     }
 
     /**
-     * 校验永久图片素材是否仍然存在（复用缓存里的 {@code media_id} 前调用）。
+     * 查询永久图片素材是否仍然存在（复用缓存里的 {@code media_id} 前调用）。
      *
      * <p>走 {@code material/get_material}：素材仍在时返回图片二进制流，素材已被删除时返回
      * {@code {"errcode":40007,"errmsg":"invalid media_id"}}（两种情形的 HTTP 状态码都是 200，故必须看一眼
      * 响应体；这里只读响应体头部 {@value #RESPONSE_PEEK_BYTES} 字节，拿到首个数据块即中止传输）。</p>
      *
-     * <p><b>只有微信明确的 40007 才判定为「不存在」</b>：其余情况——代理没有转发该接口（返回 404、HTML
-     * 或它自己的错误 JSON）、限流、鉴权失败、响应无法解析、网络异常——一律按「仍可用」处理。若把后者也
-     * 当成失效，代理不完整时就会把有效缓存误判成失效、白白重复上传素材。</p>
+     * <p><b>返回三态而非「还在 / 不在」两态</b>：只有微信明确回
+     * {@value WechatApiException#INVALID_MEDIA_ID_ERRCODE} 才判 {@link ImageAvailability#MISSING}；只有确证拿到
+     * 素材本体（非 JSON 的 2xx 响应体）才判 {@link ImageAvailability#AVAILABLE}；其余情况——代理没转发该接口
+     * （返回 404、HTML 或它自己的错误 JSON）、限流、鉴权失败、响应无法解析、空响应体、网络异常——一律
+     * {@link ImageAvailability#UNKNOWN}，由调用方决定怎么处置。</p>
      */
-    public Mono<Boolean> permanentImageExists(String apiBase, String token, String mediaId) {
+    public Mono<ImageAvailability> checkMaterialAvailability(String apiBase, String token, String mediaId) {
         if (isBlank(mediaId)) {
-            return Mono.just(true);
+            // 没有 id 可查：说不了「还在」也说不了「不在」，只能如实回「给不出结论」
+            return Mono.just(ImageAvailability.UNKNOWN);
         }
         return webClient.post()
             .uri(apiBase + "/cgi-bin/material/get_material?access_token={token}", token)
@@ -348,26 +354,34 @@ public class WechatMpClient {
                 .take(1)
                 .map(WechatMpClient::peek)
                 .defaultIfEmpty(new byte[0])
-                .map(head -> !isMaterialGone(head))
+                .map(head -> materialAvailability(response.statusCode(), head))
                 .next())
             .onErrorResume(e -> {
-                log.warn("校验永久素材 [{}] 失败，按仍可用处理：{}", mediaId, e.getMessage());
-                return Mono.just(true);
+                log.warn("校验永久素材 [{}] 失败，无法判定：{}", mediaId, e.getMessage());
+                return Mono.just(ImageAvailability.UNKNOWN);
             });
     }
 
     /**
-     * 由 {@code get_material} 的响应头部判断素材是否已被删除：只有 JSON 里 {@code errcode} 是
-     * {@value #INVALID_MEDIA_ID_ERRCODE}（invalid media_id）才算删除；二进制流（图片素材本体）与其他
-     * JSON（代理未转发该接口、限流等）都不算。
+     * 由 {@code get_material} 的响应判定素材可得性：JSON 里 {@code errcode} 是
+     * {@value WechatApiException#INVALID_MEDIA_ID_ERRCODE} 即素材已被删除，是其他错误码（代理未转发、
+     * 限流等）给不出结论；非 JSON 的 2xx 响应体是素材本体（图片二进制流），说明素材仍在；
+     * 其余（空响应体、非 2xx 的非 JSON）同样给不出结论。
      */
-    private static boolean isMaterialGone(byte[] head) {
+    private static ImageAvailability materialAvailability(HttpStatusCode status, byte[] head) {
         String text = new String(head, StandardCharsets.UTF_8).trim();
+        if (text.isEmpty()) {
+            return ImageAvailability.UNKNOWN;
+        }
         if (!text.startsWith("{")) {
-            return false;
+            return status.is2xxSuccessful() ? ImageAvailability.AVAILABLE : ImageAvailability.UNKNOWN;
         }
         Matcher matcher = ERRCODE_PATTERN.matcher(text);
-        return matcher.find() && INVALID_MEDIA_ID_ERRCODE.equals(matcher.group(1));
+        if (!matcher.find()) {
+            return ImageAvailability.UNKNOWN;
+        }
+        return WechatApiException.INVALID_MEDIA_ID_ERRCODE.equals(matcher.group(1))
+            ? ImageAvailability.MISSING : ImageAvailability.UNKNOWN;
     }
 
     /** 取出响应体头部的若干字节，并释放该数据块（Netty 池化缓冲区必须显式释放）。 */
@@ -383,6 +397,9 @@ public class WechatMpClient {
 
     /**
      * 新建图文草稿，返回草稿 media_id。
+     *
+     * <p>失败时把微信返回的 {@code errcode} 一并带进异常：调用方要据此做补救——草稿被 {@code 40007
+     * invalid media_id} 拒绝，说明封面素材已在微信侧失效，需要重传封面再试（见 {@code WechatSyncService}）。</p>
      */
     public Mono<String> addDraft(String apiBase, String token, Map<String, Object> article) {
         return webClient.post()
@@ -398,7 +415,9 @@ public class WechatMpClient {
                 if (mediaId != null) {
                     return Mono.just(mediaId.toString());
                 }
-                return Mono.error(new WechatApiException("创建公众号草稿失败：" + body));
+                Object errcode = body.get("errcode");
+                return Mono.error(new WechatApiException("创建公众号草稿失败：" + body,
+                    errcode == null ? null : errcode.toString()));
             });
     }
 

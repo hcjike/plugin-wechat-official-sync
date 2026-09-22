@@ -64,9 +64,9 @@ public class WechatOfficialSyncPlugin extends BasePlugin {
             .subscribeOn(Schedulers.boundedElastic())
             .subscribe(unused -> { },
                 error -> log.warn("初始化媒体缓存库失败：{}", error.getMessage()));
-        // 缓存清理计划任务：按设置的 cron 定时清理过期缓存（cron 与保留天数都能在设置里改，无需重启）
+        // 缓存清理计划任务：固定每天 0 点清理过期缓存（保留天数仍是设置项，每次执行时读取，改完无需重启）
         cacheCleanupService.start();
-        // 缓存备份计划任务：固定每天 0 点把缓存库快照到数据目录下的 backups（与库文件同级，只留最新 3 份）
+        // 缓存备份计划任务：固定每天 1 点把缓存库快照到数据目录下的 backups（与库文件同级，只留最新 3 份）
         cacheBackupService.start();
         // 旧版本把同步记录存放在插件 ConfigMap 中，先把存量记录迁移到任务模型（只补缺失、可重复执行）；
         // 随后把因插件（或 Halo 服务）重启而中断的同步任务用持久化输入自动重放，实现重启后恢复推送

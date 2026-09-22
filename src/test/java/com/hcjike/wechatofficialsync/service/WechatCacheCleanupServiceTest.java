@@ -2,7 +2,6 @@ package com.hcjike.wechatofficialsync.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -13,23 +12,19 @@ import com.hcjike.wechatofficialsync.config.WechatSetting;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Map;
+import java.time.LocalDateTime;
 import java.util.function.BooleanSupplier;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.springframework.beans.factory.BeanInitializationException;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
-import org.springframework.context.annotation.AnnotationConfigUtils;
-import org.springframework.context.event.EventListener;
+import org.springframework.scheduling.support.CronExpression;
 import reactor.core.publisher.Mono;
-import run.halo.app.plugin.PluginConfigUpdatedEvent;
 import run.halo.app.plugin.ReactiveSettingFetcher;
 
 /**
- * {@link WechatCacheCleanupService} 的行为验证：按保留天数清理（保留期按「最近一次使用时间」算）、
- * 「全部保留」时不动数据、保留天数与 cron 的解析容错，以及计划任务确实按配置的 cron 注册并触发。
+ * {@link WechatCacheCleanupService} 的行为验证：清理固定挂在每天 0 点、按保留天数删除（保留期按
+ * 「最近一次使用时间」算）、「全部保留」时不动数据、保留天数解析的容错，以及计划任务确实按 cron 触发与启停安全。
  *
  * <p>存储用的是真实 SQLite（每个用例一个临时库），设置读取用 mock。</p>
  */
@@ -66,8 +61,20 @@ class WechatCacheCleanupServiceTest {
     }
 
     @Test
+    void cronFiresEveryDayAtMidnight() {
+        CronExpression cron = CronExpression.parse(WechatCacheCleanupService.CLEANUP_CRON);
+
+        // 每天 0 点：上午 10:30 之后的下一次执行是次日 0 点整
+        assertThat(cron.next(LocalDateTime.of(2026, 9, 22, 10, 30)))
+            .isEqualTo(LocalDateTime.of(2026, 9, 23, 0, 0));
+        // 刚过 0 点（0 点 0 分 1 秒）时，下一次执行仍是次日 0 点整——不会在当天重复执行
+        assertThat(cron.next(LocalDateTime.of(2026, 9, 22, 0, 0, 1)))
+            .isEqualTo(LocalDateTime.of(2026, 9, 23, 0, 0));
+    }
+
+    @Test
     void cleansUpEntriesUnusedForLongerThanRetention() {
-        plan("15", "0 0 2 * * *");
+        plan("15");
         saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(20)));
         saveUsedAt(ACTIVE_FINGERPRINT, Instant.now().minus(Duration.ofDays(3)));
 
@@ -80,7 +87,7 @@ class WechatCacheCleanupServiceTest {
 
     @Test
     void keepsEverythingWhenRetentionIsNever() {
-        plan(WechatSetting.CACHE_RETENTION_NEVER, "0 0 2 * * *");
+        plan(WechatSetting.CACHE_RETENTION_NEVER);
         saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(999)));
 
         service.runCleanup();
@@ -113,42 +120,28 @@ class WechatCacheCleanupServiceTest {
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
         assertThat(WechatCacheCleanupService.resolveRetentionDays(new WechatSetting()))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("mystery", null)))
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("mystery")))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
         // 0 / 负数不是合法保留期，同样按默认处理
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("0", null)))
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("0")))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("-7", null)))
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("-7")))
             .isEqualTo(WechatCacheCleanupService.DEFAULT_RETENTION_DAYS);
 
         // 正常取值：忽略首尾空白；never（大小写不敏感）表示全部保留
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting(" 90 ", null))).isEqualTo(90);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("365", null))).isEqualTo(365);
-        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("NEVER", null))).isNull();
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting(" 90 "))).isEqualTo(90);
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("365"))).isEqualTo(365);
+        assertThat(WechatCacheCleanupService.resolveRetentionDays(setting("NEVER"))).isNull();
     }
 
     @Test
-    void cronFallsBackToDefaultAndToleratesCrontabStyle() {
-        assertThat(WechatCacheCleanupService.resolveCron(null))
-            .isEqualTo(WechatSetting.DEFAULT_CACHE_CLEANUP_CRON);
-        assertThat(WechatCacheCleanupService.resolveCron("   "))
-            .isEqualTo(WechatSetting.DEFAULT_CACHE_CLEANUP_CRON);
-        assertThat(WechatCacheCleanupService.resolveCron(" 0 30 3 * * * "))
-            .isEqualTo("0 30 3 * * *");
-        // 兼容照抄 crontab 的 5 位写法（分 时 日 月 周）：自动补上「秒」位
-        assertThat(WechatCacheCleanupService.resolveCron("30 3 * * *")).isEqualTo("0 30 3 * * *");
-        // 无法解析的表达式回退默认值
-        assertThat(WechatCacheCleanupService.resolveCron("每天凌晨三点"))
-            .isEqualTo(WechatSetting.DEFAULT_CACHE_CLEANUP_CRON);
-    }
-
-    @Test
-    void startsScheduledTaskThatRunsCleanupOnConfiguredCron() {
-        // 每秒执行一次：便于在测试中观察计划任务确实被注册并按 cron 触发了清理
-        plan("15", "* * * * * *");
+    void startsScheduledTaskThatRunsCleanupOnCron() {
+        plan("15");
         saveUsedAt(FINGERPRINT, Instant.now().minus(Duration.ofDays(20)));
 
         service.start();
+        // 每秒执行一次：便于在测试中观察计划任务确实被注册并按 cron 触发了清理
+        service.schedule("* * * * * *");
         try {
             awaitTrue(() -> find(FINGERPRINT) == null, Duration.ofSeconds(10));
         } finally {
@@ -158,7 +151,7 @@ class WechatCacheCleanupServiceTest {
 
     @Test
     void startIsIdempotentAndToleratesSettingReadFailure() {
-        // 读设置失败：仍按默认 cron 挂上计划任务，且不抛异常
+        // 读设置失败：计划任务照常挂上（保留天数在执行时才读），且不抛异常
         when(settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class))
             .thenReturn(Mono.error(new IllegalStateException("读取设置失败")));
 
@@ -167,77 +160,19 @@ class WechatCacheCleanupServiceTest {
         service.start();
 
         assertThatCode(service::stop).doesNotThrowAnyException();
+        // 已停止后再注册（如调度器正在关闭时插件又收到一次调用）：忽略，不抛异常
+        assertThatCode(() -> service.schedule("* * * * * *")).doesNotThrowAnyException();
     }
 
-    @Test
-    void reschedulesAfterSettingUpdateAndStopsCleanly() {
-        plan("15", "0 0 3 * * *");
-        service.start();
-
-        // 设置变更（含 cron）后重排：这里只验证重排不会抛错，且停止后仍可安全调用
-        plan("15", "0 4 * * *");
-        service.onConfigUpdated(configUpdatedEvent());
-
-        assertThatCode(() -> service.onConfigUpdated(configUpdatedEvent())).doesNotThrowAnyException();
-        assertThatCode(service::stop).doesNotThrowAnyException();
-        // 已停止后再收到设置变更事件（如禁用插件后保存设置）：忽略，不重新注册任务
-        assertThatCode(() -> service.onConfigUpdated(configUpdatedEvent())).doesNotThrowAnyException();
-    }
-
-    @Test
-    void springAcceptsTheEventListenerSignature() {
-        // @EventListener 的校验发生在 Spring 刷新上下文、注册监听器时：方法签名不合规（例如漏掉事件参数）
-        // 只会在运行期抛 BeanInitializationException，编译与直接调用的单测都发现不了，故这里真刷新一次
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            AnnotationConfigUtils.registerAnnotationConfigProcessors(context);
-            context.registerBean("cacheCleanup", WechatCacheCleanupService.class, () -> service);
-
-            assertThatCode(context::refresh).doesNotThrowAnyException();
-        }
-    }
-
-    @Test
-    void springRejectsEventListenerWithoutEventParameter() {
-        // 反向验证上一个用例不是空转：无参的 @EventListener 方法在这里必须被 Spring 拒绝。
-        // 这条同时也把「监听方法必须带事件参数」钉住，避免后人又把它「简化」成无参形式
-        try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext()) {
-            AnnotationConfigUtils.registerAnnotationConfigProcessors(context);
-            context.registerBean("brokenListener", BrokenEventListener.class);
-
-            assertThatThrownBy(context::refresh)
-                .isInstanceOf(BeanInitializationException.class)
-                .hasMessageContaining("Failed to process @EventListener")
-                .hasRootCauseInstanceOf(IllegalStateException.class);
-        }
-    }
-
-    /** 故意写错签名的监听器（无事件参数）：仅用于验证上面的守卫用例确实能拦住这类问题。 */
-    public static class BrokenEventListener {
-
-        @EventListener
-        public void onConfigUpdated() {
-            // 故意无参：Spring 注册监听器时会直接抛错
-        }
-    }
-
-    /** 构造一次「插件设置已更新」事件（事件负载与计划任务无关，只用于驱动监听方法）。 */
-    private static PluginConfigUpdatedEvent configUpdatedEvent() {
-        return PluginConfigUpdatedEvent.builder()
-            .source("test")
-            .newSettingValues(Map.of())
-            .build();
-    }
-
-    /** 预置设置：保留天数与 cron 表达式（{@code null} 表示留空）。 */
-    private void plan(String retentionDays, String cron) {
+    /** 预置设置：只保留「缓存保留天数」（{@code null} 表示留空）。 */
+    private void plan(String retentionDays) {
         when(settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class))
-            .thenReturn(Mono.just(setting(retentionDays, cron)));
+            .thenReturn(Mono.just(setting(retentionDays)));
     }
 
-    private static WechatSetting setting(String retentionDays, String cron) {
+    private static WechatSetting setting(String retentionDays) {
         WechatSetting setting = new WechatSetting();
         setting.setCacheRetentionDays(retentionDays);
-        setting.setCacheCleanupCron(cron);
         return setting;
     }
 

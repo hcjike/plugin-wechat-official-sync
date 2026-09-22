@@ -11,7 +11,7 @@ import org.springframework.scheduling.support.CronTrigger;
 import org.springframework.stereotype.Service;
 
 /**
- * 媒体缓存库的备份计划任务：<b>固定每天 0 点</b>把 SQLite 缓存库快照到
+ * 媒体缓存库的备份计划任务：<b>固定每天 1 点</b>把 SQLite 缓存库快照到
  * {@code <插件数据目录>/backups}（与库文件同级），只保留最新的 {@link MediaCacheBackup#KEEP} 份。
  *
  * <p>备份本身（一致快照 + 轮转）由 {@link MediaCacheBackup} 完成，这里只负责按时间调度与异常兜底：
@@ -31,11 +31,11 @@ public class WechatMediaCacheBackupService {
     private static final Logger log = LoggerFactory.getLogger(WechatMediaCacheBackupService.class);
 
     /**
-     * 备份计划任务的 cron 表达式：固定每天 0 点执行。
+     * 备份计划任务的 cron 表达式：固定每天 1 点执行。
      *
      * <p>Spring 的 cron 为 6 位（秒 分 时 日 月 周），与常见 Linux crontab 的 5 位写法不同。</p>
      */
-    static final String BACKUP_CRON = "0 0 0 * * *";
+    static final String BACKUP_CRON = "0 0 1 * * *";
 
     /** 在调度线程上等待「建库 / 备份」完成的上限。 */
     private static final Duration BACKUP_TIMEOUT = Duration.ofSeconds(60);
@@ -52,7 +52,7 @@ public class WechatMediaCacheBackupService {
         this.store = store;
     }
 
-    /** 启动计划任务（插件启动时调用）：建调度线程池并注册「每天 0 点」的备份任务。 */
+    /** 启动计划任务（插件启动时调用）：建调度线程池并注册「每天 1 点」的备份任务。 */
     public void start() {
         // 插件重载等场景可能重复调用 start()：先释放上一次的调度线程池，避免线程泄漏
         stop();

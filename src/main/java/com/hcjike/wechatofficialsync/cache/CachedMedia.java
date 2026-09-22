@@ -35,8 +35,9 @@ public record CachedMedia(
     String mediaId,
     /**
      * 微信侧图片地址：正文图片（{@link MediaCacheKind#CONTENT_IMAGE}）即是它的复用值；
-     * 永久素材（{@link MediaCacheKind#PERMANENT_IMAGE}）则存该素材的图片地址，不作为复用值，
-     * 仅用于复用前校验素材是否还在（见 {@link #remoteValue()}）。
+     * 永久素材（{@link MediaCacheKind#PERMANENT_IMAGE}）则存该素材的图片地址（{@code add_material}
+     * 返回的 {@code url}），只作留档排查用，<b>不参与复用前的校验</b>——素材被删除后该地址往往仍可访问，
+     * 据此判定「素材还在」会放过已失效的 {@code media_id}（见 {@link #remoteValue()}）。
      */
     String contentUrl,
     /** 记录建立时间（首次上传成功）。 */
@@ -51,7 +52,7 @@ public record CachedMedia(
      * @param normalizeVersion 上传时使用的图片归一化规则版本
      * @param mediaId          永久图片素材的 {@code media_id}，正文图片传 {@code null}
      * @param contentUrl       正文图片的微信地址；永久图片素材传 {@code add_material} 返回的素材图片地址
-     *                         （仅用于校验，可为 {@code null}）
+     *                         （仅作留档，不参与校验，可为 {@code null}）
      */
     public static CachedMedia uploaded(String appId, MediaCacheKind kind, String fingerprint,
         String normalizeVersion, String sourceUrl, String filename, long fileSize, String mediaId,

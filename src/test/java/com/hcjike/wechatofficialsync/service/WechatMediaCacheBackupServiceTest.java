@@ -27,7 +27,7 @@ import org.junit.jupiter.api.io.TempDir;
 import org.springframework.scheduling.support.CronExpression;
 
 /**
- * {@link WechatMediaCacheBackupService} 的行为验证：备份固定挂在每天 0 点、执行时把库快照到备份目录
+ * {@link WechatMediaCacheBackupService} 的行为验证：备份固定挂在每天 1 点、执行时把库快照到备份目录
  * （库尚未建立时先建库，好让备份里带表结构）、失败只记日志不外抛，以及计划任务确实按 cron 触发与启停安全。
  *
  * <p>存储用的是真实 SQLite（每个用例一个临时库），备份文件也真打开检查。</p>
@@ -60,15 +60,15 @@ class WechatMediaCacheBackupServiceTest {
     }
 
     @Test
-    void cronFiresEveryDayAtMidnight() {
+    void cronFiresEveryDayAtOneAm() {
         CronExpression cron = CronExpression.parse(WechatMediaCacheBackupService.BACKUP_CRON);
 
-        // 每天 0 点：上午 10:30 之后的下一次执行是次日 0 点整
+        // 每天 1 点：上午 10:30 之后的下一次执行是次日 1 点整
         assertThat(cron.next(LocalDateTime.of(2026, 9, 22, 10, 30)))
-            .isEqualTo(LocalDateTime.of(2026, 9, 23, 0, 0));
-        // 刚过 0 点（0 点 0 分 1 秒）时，下一次执行仍是次日 0 点整——不会在当天重复执行
+            .isEqualTo(LocalDateTime.of(2026, 9, 23, 1, 0));
+        // 刚过 0 点（0 点 0 分 1 秒）时，下一次执行是当天 1 点整——不会重复执行，也不会拖到次日
         assertThat(cron.next(LocalDateTime.of(2026, 9, 22, 0, 0, 1)))
-            .isEqualTo(LocalDateTime.of(2026, 9, 23, 0, 0));
+            .isEqualTo(LocalDateTime.of(2026, 9, 22, 1, 0));
     }
 
     @Test

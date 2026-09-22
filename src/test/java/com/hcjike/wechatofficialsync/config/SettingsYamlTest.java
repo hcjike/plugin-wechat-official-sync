@@ -46,16 +46,6 @@ class SettingsYamlTest {
         assertThat(field).containsEntry("value", "30");
     }
 
-    @Test
-    void cacheCleanupCronDefaultsToDailyAtTwo() throws Exception {
-        Map<String, Object> field = formField(formOf(loadSettings(), WechatSetting.GROUP),
-            "cacheCleanupCron");
-
-        // 默认每天凌晨 2 点，且必须是一份能解析的 cron
-        assertThat(field).containsEntry("value", WechatSetting.DEFAULT_CACHE_CLEANUP_CRON);
-        assertThat(WechatSetting.DEFAULT_CACHE_CLEANUP_CRON).isEqualTo("0 0 2 * * *");
-    }
-
     @SuppressWarnings("unchecked")
     private static Map<String, Object> loadSettings() throws Exception {
         try (InputStream in = SettingsYamlTest.class.getResourceAsStream(SETTINGS_RESOURCE)) {

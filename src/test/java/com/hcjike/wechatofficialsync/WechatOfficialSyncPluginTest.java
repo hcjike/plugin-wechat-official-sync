@@ -64,7 +64,7 @@ class WechatOfficialSyncPluginTest {
         verify(mediaCacheStore).initialize();
         // 启动时注册缓存清理计划任务
         verify(cacheCleanupService).start();
-        // 启动时注册缓存备份计划任务（固定每天 0 点备份缓存库）
+        // 启动时注册缓存备份计划任务（固定每天 1 点备份缓存库）
         verify(cacheBackupService).start();
         // 恢复链在后台线程执行：先迁移旧版记录，再自动重放中断的任务
         InOrder inOrder = inOrder(taskStore, taskRunner);

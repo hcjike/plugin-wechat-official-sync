@@ -7,11 +7,13 @@ import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.mockito.stubbing.OngoingStubbing;
 import reactor.core.publisher.Mono;
 import run.halo.app.extension.ConfigMap;
 import run.halo.app.extension.ReactiveExtensionClient;
@@ -435,6 +438,112 @@ class WechatSyncServiceTest {
 
         assertThat(errors).hasSize(1);
         assertThat(errors.get(0)).contains("未包含 AppSecret");
+    }
+
+    // ---------- 封面与草稿：封面素材失效（40007 invalid media_id）后的自愈重试 ----------
+    //
+    // 封面素材虽经缓存校验，仍可能已在微信侧失效：素材被删除后它的图片地址往往依旧可访问（地址是 CDN 上的
+    // 副本，不等于素材库里的条目），「接口地址」代理没转发 material/get_material 时也拿不到结论、只能保守
+    // 复用。这类情况下 draft/add 会以 40007 invalid media_id 拒绝，插件应重传一次封面再建一次草稿，
+    // 而不是把同一个失效 id 反复丢给用户。
+
+    /** 外部访问地址（本站地址）。 */
+    private static final String BASE_URL = "https://blog.example.com";
+
+    /** 封面图地址（绝对地址，提交时无需外部访问地址兜底）。 */
+    private static final String COVER_URL = BASE_URL + "/upload/cover.png";
+
+    @Test
+    void retriesDraftOnceWithReuploadedCoverWhenThumbMediaIdIsInvalid() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD", "MEDIA-NEW");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any()))
+            .thenReturn(Mono.error(invalidMediaId()), Mono.just("DRAFT-NEW"));
+
+        assertThat(createDraft(client)).isEqualTo("DRAFT-NEW");
+
+        // 封面重传了一次拿到新的 media_id，草稿因此提交了两次
+        verify(client, times(2)).uploadPermanentImage(anyString(), anyString(), any(), anyString());
+        verify(client, times(2)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void reusesReuploadedCoverOnNextSync() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD", "MEDIA-NEW");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any()))
+            .thenReturn(Mono.error(invalidMediaId()), Mono.just("DRAFT-NEW"), Mono.just("DRAFT-NEXT"));
+        // 重传拿到的 media_id 校验通过：下次同步直接复用，不会再撞上那个失效的 id
+        when(client.checkMaterialAvailability(API_BASE, "TOKEN", "MEDIA-NEW"))
+            .thenReturn(Mono.just(WechatMpClient.ImageAvailability.AVAILABLE));
+
+        assertThat(createDraft(client)).isEqualTo("DRAFT-NEW");
+        assertThat(createDraft(client)).isEqualTo("DRAFT-NEXT");
+
+        // 两次同步合计只上传了两次封面（首次上传 + 自愈重传），第二次同步是命中缓存复用新 media_id
+        verify(client, times(2)).uploadPermanentImage(anyString(), anyString(), any(), anyString());
+    }
+
+    @Test
+    void doesNotReuploadCoverForUnrelatedDraftErrors() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any()))
+            .thenReturn(Mono.error(new WechatApiException("创建公众号草稿失败：{errcode=45009}", "45009")));
+
+        assertThatThrownBy(() -> createDraft(client))
+            .isInstanceOf(WechatApiException.class)
+            .hasMessageContaining("45009");
+
+        // 与封面素材无关的失败：不重传封面、不重试草稿（避免无谓地占用素材库）
+        verify(client, times(1)).uploadPermanentImage(anyString(), anyString(), any(), anyString());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void retriesDraftAtMostOnce() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD", "MEDIA-NEW");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.error(invalidMediaId()));
+
+        assertThatThrownBy(() -> createDraft(client))
+            .isInstanceOf(WechatApiException.class)
+            .hasMessageContaining("40007");
+
+        // 只重试一次：再次被拒说明问题不在封面，不再继续重传
+        verify(client, times(2)).uploadPermanentImage(anyString(), anyString(), any(), anyString());
+        verify(client, times(2)).addDraft(anyString(), anyString(), any());
+    }
+
+    /** 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存）。 */
+    private String createDraft(WechatMpClient client) {
+        WechatSetting setting = new WechatSetting();
+        setting.setAppId(APP_ID);
+        SyncRequest request = new SyncRequest();
+        request.setTitle("测试文章");
+        request.setCover(COVER_URL);
+        request.setContent("<p>正文</p>");
+        return syncService(client, null, null)
+            .createDraft(API_BASE, setting, "TOKEN", request, new BeautifySetting(),
+                BASE_URL + "/archives/hello-world", BASE_URL)
+            .block();
+    }
+
+    /** 预置封面下载与上传结果：上传按顺序返回给定的 media_id（首个为旧素材，重传后为新素材）。 */
+    private static void stubCoverUpload(WechatMpClient client, String... mediaIds) {
+        when(client.download(COVER_URL)).thenReturn(Mono.just(pngMagicBytes()));
+        OngoingStubbing<Mono<WechatMpClient.PermanentImage>> stubbing = when(
+            client.uploadPermanentImage(anyString(), anyString(), any(), anyString()));
+        for (String mediaId : mediaIds) {
+            stubbing = stubbing.thenReturn(
+                Mono.just(new WechatMpClient.PermanentImage(mediaId, COVER_URL)));
+        }
+    }
+
+    /** 微信以「封面素材已失效」拒绝草稿（{@code errcode=40007 invalid media_id}）。 */
+    private static WechatApiException invalidMediaId() {
+        return new WechatApiException("创建公众号草稿失败：{errcode=40007, errmsg=invalid media_id}",
+            WechatApiException.INVALID_MEDIA_ID_ERRCODE);
     }
 
     // ---------- 正文附件链接 ----------

@@ -96,16 +96,8 @@ public class WechatSyncService {
                         return resolveAppSecret(setting)
                             .flatMap(appSecret -> wechatMpClient
                                 .getAccessToken(apiBase, setting.getAppId(), appSecret)
-                                .flatMap(token -> uploadCover(apiBase, setting.getAppId(), token,
-                                        request.getCover(), baseUrl)
-                                    .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材已就绪，thumb_media_id={}",
-                                        request.getTitle(), thumbMediaId))
-                                    .flatMap(thumbMediaId ->
-                                        prepareContent(apiBase, setting.getAppId(), token, request, beautify,
-                                                baseUrl)
-                                            .flatMap(content -> wechatMpClient.addDraft(apiBase, token,
-                                                buildArticle(request, setting, thumbMediaId, content,
-                                                    sourceUrl))))));
+                                .flatMap(token -> createDraft(apiBase, setting, token, request, beautify,
+                                    sourceUrl, baseUrl)));
                     }))));
     }
 
@@ -522,6 +514,58 @@ public class WechatSyncService {
     }
 
     /**
+     * 上传封面并创建草稿：先传封面拿到 {@code thumb_media_id}，再处理正文、提交 {@code draft/add}。
+     *
+     * <p><b>自愈重试</b>：封面素材虽经缓存校验，仍可能已在微信侧失效——素材被删除后它的图片地址往往依旧
+     * 可访问，把地址当判据会漏判；「接口地址」代理没转发 {@code material/get_material} 时也拿不到结论而只能
+     * 保守复用。这类情况下 {@code draft/add} 会以 {@code 40007 invalid media_id} 拒绝，此时重传一次封面再建
+     * 一次草稿（见 {@link #retryWithFreshCover}），用户不必自己排查，也不会被同一个失效 id 反复拒绝。</p>
+     *
+     * <p>包内可见是为了让测试直接覆盖「封面 → 草稿」这段链路（不必绕开整个提交入口）。</p>
+     */
+    Mono<String> createDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
+        BeautifySetting beautify, String sourceUrl, String baseUrl) {
+        return uploadCover(apiBase, setting.getAppId(), token, request.getCover(), baseUrl, false)
+            .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材已就绪，thumb_media_id={}",
+                request.getTitle(), thumbMediaId))
+            .flatMap(thumbMediaId -> prepareContent(apiBase, setting.getAppId(), token, request, beautify,
+                    baseUrl)
+                .flatMap(content -> addDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                        content)
+                    .onErrorResume(WechatSyncService::isInvalidMediaId,
+                        e -> retryWithFreshCover(apiBase, setting, token, request, baseUrl, sourceUrl,
+                            content, e))));
+    }
+
+    /** 提交草稿：把已就绪的封面与正文组装成文章（失败时的错误带微信错误码，见 {@link WechatApiException}）。 */
+    private Mono<String> addDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
+        String sourceUrl, String thumbMediaId, String content) {
+        return wechatMpClient.addDraft(apiBase, token,
+            buildArticle(request, setting, thumbMediaId, content, sourceUrl));
+    }
+
+    /**
+     * 草稿被 {@code 40007 invalid media_id} 拒绝后的自愈重试：跳过缓存校验重新上传封面拿到新的
+     * {@code media_id}，用同一份正文（正文图片已就绪，不必重新转存）再建一次草稿。
+     *
+     * <p>重传会覆盖那条失效的缓存记录，因此后续同步同一张封面、或用户手动重新同步，都不会再撞上它。
+     * 只重试一次：再次失败说明问题不在封面，按原错误抛出，不做无谓的重传。</p>
+     */
+    private Mono<String> retryWithFreshCover(String apiBase, WechatSetting setting, String token,
+        SyncRequest request, String baseUrl, String sourceUrl, String content, Throwable cause) {
+        log.warn("文章《{}》创建草稿被拒（{}），判定封面素材已失效：重新上传封面后重试一次",
+            request.getTitle(), cause.getMessage());
+        return uploadCover(apiBase, setting.getAppId(), token, request.getCover(), baseUrl, true)
+            .flatMap(thumbMediaId -> addDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                content));
+    }
+
+    /** 是否为「封面素材已失效」（草稿被 {@code 40007 invalid media_id} 拒绝）。 */
+    private static boolean isInvalidMediaId(Throwable error) {
+        return error instanceof WechatApiException api && api.isInvalidMediaId();
+    }
+
+    /**
      * 上传封面为永久素材，返回 thumb_media_id。
      *
      * <p>微信公众号草稿（draft/add）强制要求有效的封面素材 id，缺失会被拒绝并返回
@@ -530,9 +574,12 @@ public class WechatSyncService {
      *
      * <p>永久素材会占用微信素材库，同一张封面图（按文件内容指纹判定）此前若已上传过，
      * 由 {@link WechatMediaCacheService} 直接复用其 media_id，不再重复上传。</p>
+     *
+     * @param refresh {@code true} 时跳过缓存校验直接重传并覆盖缓存记录
+     *                （草稿被 40007 拒绝、确认封面素材已失效时的自愈重试）
      */
     private Mono<String> uploadCover(String apiBase, String appId, String token, String cover,
-        String baseUrl) {
+        String baseUrl, boolean refresh) {
         String url = resolveUrl(cover, baseUrl);
         if (url == null) {
             String reason = isBlank(cover)
@@ -546,8 +593,12 @@ public class WechatSyncService {
                 if (bytes == null || bytes.length == 0) {
                     return Mono.error(new WechatApiException("封面图下载内容为空「" + url + "」，请确认该地址可正常访问"));
                 }
-                return mediaCacheService.resolvePermanentImage(apiBase, appId, token, bytes,
+                Mono<String> uploaded = refresh
+                    ? mediaCacheService.reuploadPermanentImage(apiBase, appId, token, bytes,
                         filenameFrom(url), url)
+                    : mediaCacheService.resolvePermanentImage(apiBase, appId, token, bytes,
+                        filenameFrom(url), url);
+                return uploaded
                     .onErrorMap(e -> !(e instanceof WechatApiException),
                         e -> new WechatApiException("封面图上传到微信失败「" + url + "」：" + e.getMessage()));
             });

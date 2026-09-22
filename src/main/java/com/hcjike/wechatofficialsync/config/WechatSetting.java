@@ -31,13 +31,6 @@ public class WechatSetting {
     /** 缓存保留策略：全部保留（永久保留）。 */
     public static final String CACHE_RETENTION_NEVER = "never";
 
-    /**
-     * 缓存清理计划任务的默认 cron 表达式：每天凌晨 2 点执行。
-     *
-     * <p>Spring 的 cron 为 6 位（秒 分 时 日 月 周），与常见 Linux crontab 的 5 位写法不同。</p>
-     */
-    public static final String DEFAULT_CACHE_CLEANUP_CRON = "0 0 2 * * *";
-
     private String appId;
 
     /**
@@ -82,15 +75,9 @@ public class WechatSetting {
      * 素材缓存的保留天数：取值 {@link #CACHE_RETENTION_NEVER}（全部保留）或天数（表单可选
      * 7/15/30/45/60/90/120/180/240/300/365 天，未配置或取值非法时按 30 天处理）。
      *
-     * <p>保留期按记录的「最近一次使用时间」计算：某张图只要还会被同步命中，计时就会刷新，
+     *         <p>保留期按记录的「最近一次使用时间」计算：某张图只要还会被同步命中，计时就会刷新，
      * 不会被清理任务误删；因此清理掉的都是确实已经不再使用的缓存。</p>
      */
     private String cacheRetentionDays;
-
-    /**
-     * 缓存清理计划任务的 cron 表达式（6 位：秒 分 时 日 月 周）。
-     *
-     * <p>留空或填写非法时使用 {@link #DEFAULT_CACHE_CLEANUP_CRON}；修改后立即生效，无需重启插件。</p>
-     */
-    private String cacheCleanupCron;
 }
+

@@ -31,13 +31,15 @@ import reactor.core.publisher.Mono;
  * <p><b>处理流程</b>（见 {@link #resolve}）：</p>
  * <ol>
  *   <li>算出原始字节的文件指纹并查缓存；</li>
- *   <li>命中 → 校验资源是否还在（首选图片地址 HEAD 一次、不经代理；地址缺失或给不出结论时回落到永久素材的
- *       {@code media_id} 校验），两道校验都只在「明确不存在」时判失效；</li>
- *   <li>未命中或校验发现已失效 → 调用对应上传接口，成功后把「指纹 → url / media_id」写入或覆盖缓存。</li>
+ *   <li>命中 → <b>按复用值本身</b>校验资源是否还在（见 {@link #verify}）：正文图片校验微信图片地址，
+ *       永久素材用 {@code media_id} 查素材本身；<b>只有明确存在才复用</b>；</li>
+ *   <li>未命中、已失效、或校验<b>给不出结论</b> → 调用对应上传接口，成功后把「指纹 → url / media_id」
+ *       写入或覆盖缓存（见 {@link #reuseOrUpload}：多传一份的代价小于复用失败导致草稿发不出去）。</li>
  * </ol>
  *
- * <p>上传失败照常向上抛出（不吞异常）；只有「缓存读写失败」「校验请求本身失败」这类不影响正确性的
- * 环节才会降级处理，详见 {@link WechatMediaCacheStore} 与 {@link #verify}。</p>
+ * <p>上传失败照常向上抛出（不吞异常）；只有「缓存读写失败」「校验请求本身失败」这类不会让结果变错的
+ * 环节才降级处理——缓存读写失败按未命中处理，校验失败按「不可信」处理（即重传），
+ * 详见 {@link WechatMediaCacheStore} 与 {@link #verify}。</p>
  *
  * @author hcjike
  * @since 1.0.0
@@ -85,9 +87,17 @@ public class WechatMediaCacheService {
     }
 
     /**
-     * 缓存优先的上传流程：先按「原始字节指纹 + 当前归一化版本」查缓存，命中则校验后复用，
-     * 未命中（或已失效、或归一化规则已变更）则上传后写缓存。
+     * 跳过缓存校验、直接重新上传永久图片素材，返回新的 {@code media_id} 并覆盖缓存记录。
+     *
+     * <p>用于「草稿被微信以 {@code 40007 invalid media_id} 拒绝」后的自愈重试：此时缓存里那条记录已被证明
+     * 不可用，重传会把它覆盖掉，之后再同步同一张封面就能复用新的 {@code media_id}。</p>
      */
+    public Mono<String> reuploadPermanentImage(String apiBase, String appId, String token, byte[] data,
+        String filename, String sourceUrl) {
+        return uploadAndCache(MediaCacheKind.PERMANENT_IMAGE, apiBase, appId, token, data, filename,
+            sourceUrl, fingerprint(data));
+    }
+
     private Mono<String> resolve(MediaCacheKind kind, String apiBase, String appId, String token,
         byte[] data, String filename, String sourceUrl) {
         String fingerprint = fingerprint(data);
@@ -99,10 +109,11 @@ public class WechatMediaCacheService {
     }
 
     /**
-     * 命中缓存：校验微信侧资源是否仍然存在，存在则复用，否则重新上传并覆盖缓存。
+     * 命中缓存：校验微信侧资源是否仍然存在，<b>只有明确存在才复用</b>，否则重新上传并覆盖缓存。
      *
-     * <p>注意「复用值」与「校验依据」不是同一个字段：正文图片复用的就是它的图片地址；永久素材复用是的
-     * {@code media_id}，而校验优先用它上传时返回的素材图片地址（见 {@link #verify}）。</p>
+     * <p>「已失效」与「给不出结论」在这里同等对待——都重传：判定不出结论时重传最多浪费一次上传
+     * （正文图片不占素材库，永久素材多一份），而保守复用一旦碰上资源真的失效，整篇草稿就发不出去。
+     * 两边代价不对等，故宁可多传一份（更彻底的自愈见 {@code WechatSyncService} 对 40007 的重试）。</p>
      */
     private Mono<String> reuseOrUpload(MediaCacheKind kind, String apiBase, String appId, String token,
         byte[] data, String filename, String sourceUrl, String fingerprint, CachedMedia cached) {
@@ -113,13 +124,14 @@ public class WechatMediaCacheService {
             return uploadAndCache(kind, apiBase, appId, token, data, filename, sourceUrl, fingerprint);
         }
         return verify(kind, apiBase, token, cached)
-            .flatMap(alive -> {
-                if (alive) {
-                    log.info("{}[{}] 命中缓存且微信侧资源仍存在，直接复用：{}", label(kind), filename,
+            .flatMap(state -> {
+                if (state == WechatMpClient.ImageAvailability.AVAILABLE) {
+                    log.info("{}[{}] 命中缓存且微信侧资源确实还在，直接复用：{}", label(kind), filename,
                         remoteValue);
                     return touchAndReturn(kind, appId, fingerprint, cached, remoteValue);
                 }
-                log.info("{}[{}] 的缓存已失效（微信侧资源已不存在），重新上传", label(kind), filename);
+                log.info("{}[{}] 的缓存不再可信（{}），重新上传并覆盖缓存：{}", label(kind), filename,
+                    describe(state), remoteValue);
                 return Mono.defer(() -> uploadAndCache(kind, apiBase, appId, token, data, filename,
                     sourceUrl, fingerprint));
             });
@@ -132,37 +144,32 @@ public class WechatMediaCacheService {
     }
 
     /**
-     * 校验缓存里的微信侧资源是否仍然存在，两道校验按可靠性排序使用：
+     * 查询缓存里那项资源在微信侧是否仍然存在，<b>校验依据必须与复用值一致</b>：
      *
-     * <ol>
-     *   <li><b>图片地址</b>（首选）：素材/图片在微信 CDN 上的公开地址，<b>不经过插件设置的「接口地址」代理</b>，
-     *       因而代理转发不全时依然可用；2xx 即可复用、404/410 判失效；</li>
-     *   <li><b>media_id</b>（回落到永久素材）：地址缺失或地址校验给不出结论时，用 {@code material/get_material}
-     *       直接问素材本身是否还在（经代理，代理没转发该接口时无法给出结论）。</li>
-     * </ol>
+     * <ul>
+     *   <li><b>正文图片</b>：复用值就是它的微信图片地址，故校验这个地址（{@code HEAD} 一次，不经插件设置的
+     *       「接口地址」代理）；</li>
+     *   <li><b>永久图片素材</b>：复用值是 {@code media_id}，故用 {@code material/get_material} 直接查
+     *       <b>素材本身</b>。这里<b>不能</b>拿素材的图片地址来判断素材还在不在——素材在公众号后台被删除后，
+     *       它的图片地址往往仍可访问（地址代表 CDN 上的图片副本，不等于素材库里的条目），据此复用会拿到已失效
+     *       的 {@code media_id}，直到 {@code draft/add} 报 {@code 40007 invalid media_id} 才暴露。</li>
+     * </ul>
      *
-     * <p>两道校验都只在「<b>明确</b>不存在」时返回 {@code false}，其余情况（非 2xx 也非 404/410、无法解析、
-     * 网络异常、代理未实现接口等）一律保守复用：一次误判就会把已上传的素材重传一遍，正好违背缓存的意义。</p>
+     * <p>两道校验都是三态（{@link WechatMpClient.ImageAvailability}）：明确存在 / 明确不存在 / 给不出结论。
+     * 怎么用由 {@link #reuseOrUpload} 决定——只有「明确存在」才复用。</p>
      */
-    private Mono<Boolean> verify(MediaCacheKind kind, String apiBase, String token, CachedMedia cached) {
-        String url = cached.contentUrl();
-        if (url == null || url.isBlank()) {
-            return verifyByMediaId(kind, apiBase, token, cached.mediaId());
-        }
-        return wechatMpClient.checkImageAvailability(url)
-            .flatMap(availability -> switch (availability) {
-                case AVAILABLE -> Mono.just(true);
-                case MISSING -> Mono.just(false);
-                case UNKNOWN -> verifyByMediaId(kind, apiBase, token, cached.mediaId());
-            });
+    private Mono<WechatMpClient.ImageAvailability> verify(MediaCacheKind kind, String apiBase, String token,
+        CachedMedia cached) {
+        return kind == MediaCacheKind.PERMANENT_IMAGE
+            ? wechatMpClient.checkMaterialAvailability(apiBase, token, cached.mediaId())
+            : wechatMpClient.checkImageAvailability(cached.contentUrl());
     }
 
-    /** 用 {@code media_id} 校验永久素材；正文图片没有该标识（或标识为空）时视为「仍可用」。 */
-    private Mono<Boolean> verifyByMediaId(MediaCacheKind kind, String apiBase, String token, String mediaId) {
-        if (kind != MediaCacheKind.PERMANENT_IMAGE || mediaId == null || mediaId.isBlank()) {
-            return Mono.just(true);
-        }
-        return wechatMpClient.permanentImageExists(apiBase, token, mediaId);
+    /** 日志用：说清楚为什么「不再可信」，便于排查（如代理没转发 {@code material/get_material}）。 */
+    private static String describe(WechatMpClient.ImageAvailability state) {
+        return state == WechatMpClient.ImageAvailability.MISSING
+            ? "微信侧已不存在"
+            : "校验给不出结论（代理未转发该接口 / 限流 / 网络异常等）";
     }
 
     /** 调用对应上传接口，成功后把文件指纹与微信返回的内容写入（或覆盖）缓存。 */
@@ -170,7 +177,7 @@ public class WechatMediaCacheService {
         byte[] data, String filename, String sourceUrl, String fingerprint) {
         String normalizeVersion = WechatMpClient.NORMALIZE_VERSION;
         Mono<CachedMedia> uploaded = kind == MediaCacheKind.PERMANENT_IMAGE
-            // 永久素材：media_id 供草稿引用，url 留作下次复用前的校验依据
+            // 永久素材：media_id 供草稿引用，url 仅留档（素材是否还在由 media_id 本身校验）
             ? wechatMpClient.uploadPermanentImage(apiBase, token, data, filename)
                 .map(image -> CachedMedia.uploaded(appId, kind, fingerprint, normalizeVersion, sourceUrl,
                     filename, sizeOf(data), image.mediaId(), image.url()))
