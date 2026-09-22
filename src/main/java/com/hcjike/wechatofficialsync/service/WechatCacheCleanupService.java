@@ -88,6 +88,11 @@ public class WechatCacheCleanupService {
         // 守护线程且不等待任务收尾：插件卸载/热重载时不能留下调度线程（会牵住插件类加载器）
         created.setDaemon(true);
         created.setRemoveOnCancelPolicy(true);
+        // 停止时等正在执行的那次清理收尾（上限 5 秒）：清理是 SQLite 的批量 DELETE，
+        // 默认的 shutdownNow 会中断写入；有上限的等待保证 stop() 返回后缓存库不再被改动，
+        // 也不会把插件卸载拖住
+        created.setWaitForTasksToCompleteOnShutdown(true);
+        created.setAwaitTerminationSeconds(5);
         created.initialize();
         scheduler = created;
         schedule(CLEANUP_CRON);

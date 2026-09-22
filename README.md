@@ -621,6 +621,18 @@ pnpm dev
 **Q：文章里使用了其他插件生成的内容，能同步到微信吗？**
 不能。此类内容依赖插件自身的样式与脚本渲染，而微信图文只保留标准 HTML 与行内样式，无法在微信中渲染与显示（兼容与测试均以 **Halo 默认编辑器**输出的内容为准）。需要同步的正文请使用默认编辑器的标准排版元素（标题、段落、图片、代码块、表格、分栏卡片、画廊、折叠内容等）编写。
 
+**Q：日志里出现 `Start to initialize indices for type…`、`Total indexed count`、`Indexing from @start`，是插件出问题了吗？**
+
+不是。这是 **Halo 核心**的扩展索引初始化日志（由 `run.halo.app.extension.indexer.DefaultIndicesInitializer` 打印，不是本插件输出的），**正常且无需处理**。
+
+Halo 会为每种自定义模型建立内存索引（`metadata.name`、创建/删除时间与标签），用于加速 `list`、字段选择器与排序查询。插件在启动时注册了 `WechatSyncTask` 模型，Halo 便在注册 Scheme 的那一刻**同步**扫描库里已存在的该类型记录、灌入索引，然后打印累计条数与耗时。逐行含义：
+
+- `Start to initialize indices for type: …WechatSyncTask, prefix: /registry/api.wechat-sync.halo.run/wechatsynctasks`：开始为哪个模型建索引、扫描哪段存储（前缀由模型的 `@GVK` 推导）；
+- `Total indexed count: 9`：本次扫描并送入索引的任务记录数。任务是一篇文章一条（任务名规则 `wechat-sync-<文章 name>`），所以这个数字约等于**曾经提交过同步的文章数**（成功与失败记录都会保留）；
+- `StopWatch 'Initialize indices for …WechatSyncTask'` 与下方的耗时表：`Indexing from @start` 是**第一批**（从头扫，每批 100 条），`Indexing from /registry/…/wechat-sync-e0248eaf-…` 是**从上一批最后一条记录之后继续**——那串就是本插件的任务名，文章 `name` 是 Halo 生成的随机串，看起来像 UUID；由于循环要再取一次空批才能确认结束，100 条以内固定会看到 2 行批次。
+
+每次插件启动或热重载（重新注册模型）都会看到这组日志，耗时与任务记录条数相关，通常只有几毫秒。若它随时间明显变长，可从「任务记录条数」入手排查——文章被永久删除时对应任务会被自动清理、任务落到终态后也会清空正文快照，因此不会无限增长。
+
 ## 许可证
 
 [GPL-3.0](./LICENSE) © 宏尘极客（hcjike）
