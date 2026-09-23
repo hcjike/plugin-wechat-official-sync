@@ -402,6 +402,8 @@ onBeforeUnmount(() => {
                 已截断
               </span>
             </h1>
+            <!-- 标题与正文的分隔线：标题区（含截断标识）与正文视觉分开 -->
+            <div class="sync-preview__divider" role="separator"></div>
             <div ref="contentRef" class="sync-preview__content" @click="blockLinkNavigation"></div>
           </div>
           <!-- 摘要：未填写时整块不显示；单独一张卡片，位于正文与草稿元信息（作者等）之间 -->
@@ -654,14 +656,29 @@ onBeforeUnmount(() => {
   box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
 }
 
-/* 与微信图文标题观感一致（对齐美化器对正文 H1 的处理） */
+/* 与微信图文标题观感一致（对齐美化器对正文 H1 的处理）；下边距交给下方分隔线统一控制 */
 .sync-preview__title {
-  margin: 0 0 0.9em;
+  margin: 0;
   font-size: 22px;
   font-weight: bold;
   line-height: 1.4;
   color: #222;
   text-align: center;
+}
+
+/* 标题与正文的分隔线：中段稍深、两端渐隐的浅灰细线——比正文块级间距更能明确切分标题区与正文区，
+   又因两端渐隐、颜色只到中性灰（不到正文黑）而保持克制，不抢标题与正文的视觉焦点 */
+.sync-preview__divider {
+  height: 1px;
+  margin: 18px 0 22px;
+  background: linear-gradient(
+    to right,
+    rgb(203 213 225 / 0%),
+    #cbd5e1 18%,
+    #c3cbd6 50%,
+    #cbd5e1 82%,
+    rgb(203 213 225 / 0%)
+  );
 }
 
 /* 「已截断」标识：内联在字段值之后，悬停可查看上限与截断说明 */
