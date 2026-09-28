@@ -2,6 +2,7 @@
 import { Toast, VButton } from '@halo-dev/components'
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import IconCloseLine from '~icons/ri/close-line'
+import IconWechatFill from '~icons/ri/wechat-fill'
 import type { PreviewPayload } from '../utils/syncToWechat'
 
 const props = defineProps<{
@@ -30,12 +31,18 @@ const titleText = computed(() => meta.value?.title || props.title)
 const bodyRef = ref<HTMLElement | null>(null)
 /** 正文渲染宿主：正文渲染进它的 Shadow DOM，与 Console 页面样式互相隔离。 */
 const contentRef = ref<HTMLElement | null>(null)
+/** 正文末尾的哨兵：进入视口附近即追加下一批正文（见 setupLazyAppend）。 */
+const sentinelRef = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const submitting = ref(false)
 
 /** 上传后将使用的作者；为空表示插件「默认作者」与文章作者都未设置。 */
 const authorText = computed(() => meta.value?.author || '未设置')
+
+/** 加载骨架屏的正文占位行宽度：长短交替，接近真实段落的观感。 */
+const SKELETON_LINES = ['100%', '94%', '98%', '62%', '100%', '88%', '96%', '70%', '92%', '56%']
+
 
 /** 上传后将使用的留言设置文案。 */
 const commentText = computed(() => {
@@ -130,9 +137,11 @@ async function load() {
 /**
  * 正文宿主的补充样式：随正文一起渲染进 Shadow DOM（见 renderContent），
  * 与页面样式互相隔离、以普通选择器书写（原 scoped CSS 中的 :deep 规则移到这里）。
+ *
+ * 这里的颜色只影响预览中的可见性（代码块底色、行号、布局表格的预览补线），
+ * 与提交到微信的产物无关：正文仍是原样提交，补线不会进入草稿。
  */
-const PREVIEW_CONTENT_STYLES = `<style>
-/* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
+const PREVIEW_CONTENT_CSS = `/* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
    左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），
    否则行号列与代码行会散架、所有代码行挤成一行 */
 .code-snippet__fix {
@@ -142,9 +151,9 @@ const PREVIEW_CONTENT_STYLES = `<style>
   font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.7;
-  color: #333;
-  background: #f7f7f7;
-  border: 1px solid #f0f0f0;
+  color: #2b2f33;
+  background: #f4f6f8;
+  border: 1px solid #e2e6ec;
   border-radius: 4px;
 }
 
@@ -152,7 +161,8 @@ ul.code-snippet__line-index {
   flex: none;
   padding: 12px 8px;
   margin: 0;
-  color: #b2b2b2;
+  /* 行号加深一档：原 #b2b2b2 在浅灰底上几乎看不清，读不出代码行数 */
+  color: #949ca6;
   text-align: right;
   list-style: none;
   counter-reset: line;
@@ -190,7 +200,8 @@ pre.code-snippet__js code {
 /* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
    预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
 .wechat-layout-table td {
-  border: 1px solid #e6e6e6;
+  /* 补线加深到 #d3dae2：原 #e6e6e6 在白底上太淡，看不出行列结构 */
+  border: 1px solid #d3dae2;
 }
 
 /* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
@@ -198,19 +209,88 @@ pre.code-snippet__js code {
 .wechat-layout-table + .wechat-layout-table {
   margin-top: 10px;
 }
-</style>`
+`
+
+/** 首屏渲染的正文顶层节点数：够铺满一屏即可，其余等滚动接近时再追加。 */
+const FIRST_CHUNK_SIZE = 12
+/** 后续每批追加的正文顶层节点数。 */
+const CHUNK_SIZE = 12
+/** 哨兵进入视口前多远开始预加载下一批（px）。 */
+const APPEND_MARGIN = '600px 0px'
+
+/** 尚未渲染的正文顶层节点（按文档顺序）。 */
+let pendingNodes: ChildNode[] = []
+/** 驱动分段追加的观察器；正文换血或弹窗关闭时断开。 */
+let appendObserver: IntersectionObserver | null = null
+
+/** 停止分段追加并清理观察器。 */
+function stopLazyAppend() {
+  appendObserver?.disconnect()
+  appendObserver = null
+}
 
 /**
  * 把美化后的正文渲染进宿主的 Shadow DOM：页面全局样式影响不到正文，
  * 正文只按自己的行内样式渲染，正文样式也不会外泄影响页面。
+ *
+ * 超长正文（长文、上百张图）一次性插入会明显卡顿，故按顶层节点分块：
+ * 先渲染首屏所需的一批，其余在滚动接近末尾时逐批追加；正文中的图片统一改为
+ * 懒加载，未滚到的图片不发起请求。复制 / 提交始终用完整的 html，不受分块影响。
  */
 function renderContent() {
   const host = contentRef.value
   if (!host || !html.value) {
     return
   }
+  stopLazyAppend()
   const root = host.shadowRoot ?? host.attachShadow({ mode: 'open' })
-  root.innerHTML = PREVIEW_CONTENT_STYLES + html.value
+  const parsed = new DOMParser().parseFromString(html.value, 'text/html')
+  // 图片懒加载只作用于预览渲染：复制与提交仍使用原始 html（含原图地址）
+  parsed.body.querySelectorAll('img').forEach((img) => {
+    img.setAttribute('loading', 'lazy')
+    img.setAttribute('decoding', 'async')
+  })
+  pendingNodes = Array.from(parsed.body.childNodes)
+  const style = document.createElement('style')
+  style.textContent = PREVIEW_CONTENT_CSS
+  root.replaceChildren(style, ...pendingNodes.splice(0, FIRST_CHUNK_SIZE))
+  setupLazyAppend()
+}
+
+/**
+ * 正文分段追加：哨兵（正文末尾）进入视口附近即追加下一批。
+ * 追加后哨兵可能仍在预加载范围内、intersecting 状态未变而不再回调，
+ * 故重新 observe 一次以继续评估，直到全部正文渲染完。
+ */
+function setupLazyAppend() {
+  const sentinel = sentinelRef.value
+  const scroller = bodyRef.value
+  if (!sentinel || !scroller || pendingNodes.length === 0) {
+    return
+  }
+  appendObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) {
+        return
+      }
+      const root = contentRef.value?.shadowRoot
+      const chunk = pendingNodes.splice(0, CHUNK_SIZE)
+      if (!root || chunk.length === 0) {
+        stopLazyAppend()
+        return
+      }
+      root.append(...chunk)
+      if (pendingNodes.length === 0) {
+        stopLazyAppend()
+        return
+      }
+      // 哨兵仍在预加载范围内时重新观察，触发下一批的评估
+      appendObserver?.unobserve(sentinel)
+      appendObserver?.observe(sentinel)
+    },
+    { root: scroller, rootMargin: APPEND_MARGIN },
+  )
+  appendObserver.observe(sentinel)
 }
 
 // 正文或加载状态变化后（内容区挂载 / 重建）等 DOM 更新完再渲染
@@ -362,6 +442,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
+  stopLazyAppend()
 })
 </script>
 
@@ -375,15 +456,38 @@ onBeforeUnmount(() => {
       aria-label="同步预览"
     >
       <header class="sync-preview__header">
-        <span class="sync-preview__heading">同步预览</span>
+        <span class="sync-preview__heading">
+          <IconWechatFill class="sync-preview__brand" />
+          同步预览
+        </span>
         <button class="sync-preview__close" type="button" aria-label="关闭" @click="cancel">
           <IconCloseLine />
         </button>
       </header>
       <div ref="bodyRef" class="sync-preview__body">
-        <div v-if="loading" class="sync-preview__status">
-          <span class="sync-preview__spinner"></span>
-          <span>正在生成预览…</span>
+        <!-- 加载骨架屏：按真实结构占位（标题 / 署名 / 正文行 / 元信息），内容到位时不跳动 -->
+        <div
+          v-if="loading"
+          class="sync-preview__skeleton"
+          role="status"
+          aria-busy="true"
+          aria-live="polite"
+        >
+          <span class="sync-preview__sr-only">正在生成预览…</span>
+          <div class="sync-preview__phone">
+            <div class="sync-preview__sk-title"></div>
+            <div class="sync-preview__sk-byline"></div>
+            <div class="sync-preview__divider" role="separator"></div>
+            <div
+              v-for="(width, index) in SKELETON_LINES"
+              :key="index"
+              class="sync-preview__sk-line"
+              :style="{ width }"
+            ></div>
+          </div>
+          <div class="sync-preview__details">
+            <div v-for="row in 3" :key="row" class="sync-preview__sk-row"></div>
+          </div>
         </div>
         <div v-else-if="error" class="sync-preview__status">
           <p class="sync-preview__error">{{ error }}</p>
@@ -405,6 +509,8 @@ onBeforeUnmount(() => {
             <!-- 标题与正文的分隔线：标题区（含截断标识）与正文视觉分开 -->
             <div class="sync-preview__divider" role="separator"></div>
             <div ref="contentRef" class="sync-preview__content" @click="blockLinkNavigation"></div>
+            <!-- 分段渲染的哨兵：正文末尾，滚到附近即追加下一批正文 -->
+            <div ref="sentinelRef" class="sync-preview__sentinel" aria-hidden="true"></div>
           </div>
           <!-- 摘要：未填写时整块不显示；单独一张卡片，位于正文与草稿元信息（作者等）之间 -->
           <div v-if="meta?.digest" class="sync-preview__digest">
@@ -495,7 +601,10 @@ onBeforeUnmount(() => {
   /* 遮罩上的拖拽/滑动/滚轮不产生默认行为，避免透传到背后的文章列表 */
   touch-action: none;
   user-select: none;
-  background: rgb(0 0 0 / 45%);
+  /* 加深遮罩并轻微模糊：拉开弹窗与背后文章列表的层级，聚焦预览内容 */
+  background: rgb(15 23 42 / 55%);
+  -webkit-backdrop-filter: blur(2px);
+  backdrop-filter: blur(2px);
 }
 
 .sync-preview__panel {
@@ -513,50 +622,92 @@ onBeforeUnmount(() => {
   max-height: min(92dvh, 880px);
   overflow: hidden;
   background: #fff;
-  border-radius: 8px;
-  box-shadow: 0 12px 32px rgb(0 0 0 / 18%);
+  border-radius: 12px;
+  /* 双层阴影：近距描边 + 远距投影，弹窗浮起感更明确 */
+  box-shadow:
+    0 2px 8px rgb(15 23 42 / 12%),
+    0 24px 60px rgb(15 23 42 / 28%);
   transform: translate(-50%, -50%);
+  animation: sync-preview-in 0.18s ease-out;
+}
+
+@keyframes sync-preview-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-50% + 8px));
+  }
 }
 
 .sync-preview__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 14px 20px;
+  padding: 16px 20px;
   border-bottom: 1px solid #e5e7eb;
   /* 触摸滑动不从标题栏透传到背后列表 */
   touch-action: none;
 }
 
 .sync-preview__heading {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
   font-size: 14px;
   font-weight: 600;
   color: #111827;
+}
+
+/* 标题栏的微信绿品牌图标：点明这是「同步到公众号」的预览 */
+.sync-preview__brand {
+  font-size: 17px;
+  color: #07c160;
 }
 
 .sync-preview__close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 2px;
+  padding: 4px;
   font-size: 18px;
   color: #6b7280;
   cursor: pointer;
   background: none;
   border: none;
+  border-radius: 6px;
+  transition: background-color 0.15s, color 0.15s;
 }
 
 .sync-preview__close:hover {
   color: #111827;
+  background: #f3f4f6;
 }
 
 .sync-preview__body {
   flex: 1;
-  padding: 8px;
+  /* 卡片与弹窗边框的留白：够分开层级即可，过宽会白白吃掉正文的可用宽度 */
+  padding: 6px;
   overflow-y: auto;
   /* 预览滚动到底后不再链式滚动背后的文章列表 */
   overscroll-behavior: contain;
-  background: #f3f4f6;
+  background: #f1f3f5;
+  scrollbar-width: thin;
+  scrollbar-color: #c8d0da transparent;
+}
+
+.sync-preview__body::-webkit-scrollbar {
+  width: 10px;
+}
+
+.sync-preview__body::-webkit-scrollbar-thumb {
+  background: #c8d0da;
+  background-clip: content-box;
+  border: 3px solid transparent;
+  border-radius: 999px;
+}
+
+.sync-preview__body::-webkit-scrollbar-thumb:hover {
+  background: #aeb8c6;
+  background-clip: content-box;
 }
 
 .sync-preview__status {
@@ -575,19 +726,65 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
-.sync-preview__spinner {
-  width: 22px;
-  height: 22px;
-  border: 2px solid #d1d5db;
-  border-top-color: #111827;
-  border-radius: 50%;
-  animation: sync-preview-spin 0.8s linear infinite;
+/* 加载骨架屏：占位块共用「浅灰底 + 高光扫过」，结构与真实内容一致，内容到位时不跳动 */
+.sync-preview__sk-title,
+.sync-preview__sk-byline,
+.sync-preview__sk-line,
+.sync-preview__sk-row {
+  background-color: #eef0f3;
+  background-image: linear-gradient(90deg, #eef0f3 25%, #e2e5ea 37%, #eef0f3 63%);
+  background-size: 400% 100%;
+  border-radius: 4px;
+  animation: sync-preview-shimmer 1.4s ease infinite;
 }
 
-@keyframes sync-preview-spin {
-  to {
-    transform: rotate(360deg);
+@keyframes sync-preview-shimmer {
+  0% {
+    background-position: 100% 50%;
   }
+
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+.sync-preview__sk-title {
+  width: 72%;
+  height: 26px;
+  margin: 0 auto 12px;
+}
+
+.sync-preview__sk-byline {
+  width: 38%;
+  height: 12px;
+  margin: 0 auto;
+}
+
+.sync-preview__sk-line {
+  height: 13px;
+  margin-bottom: 11px;
+}
+
+.sync-preview__sk-line:last-child {
+  margin-bottom: 0;
+}
+
+.sync-preview__sk-row {
+  width: 100%;
+  height: 12px;
+}
+
+/* 仅供读屏的提示文案（骨架屏用图形表达加载中，视觉上不重复这段文字） */
+.sync-preview__sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* 摘要卡片：未填写时不渲染；单独占一张卡片，与下方草稿元信息卡片分开 */
@@ -596,12 +793,16 @@ onBeforeUnmount(() => {
   gap: 8px;
   width: 100%;
   padding: 12px 16px;
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: 12px;
   line-height: 1.6;
   background: #fff;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
+  /* 细边框 + 双层软阴影：白卡片压在浅灰底上时边界清晰、层级立得住 */
+  border: 1px solid #eceff3;
+  border-radius: 10px;
+  box-shadow:
+    0 1px 2px rgb(16 24 40 / 6%),
+    0 4px 12px rgb(16 24 40 / 6%);
 }
 
 /* 上传后草稿的元信息：作者 / 原文链接 / 留言设置，放在正文下方，宽度与正文卡片对齐 */
@@ -611,12 +812,16 @@ onBeforeUnmount(() => {
   gap: 6px;
   width: 100%;
   padding: 12px 16px;
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: 12px;
   line-height: 1.6;
   background: #fff;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
+  /* 细边框 + 双层软阴影：白卡片压在浅灰底上时边界清晰、层级立得住 */
+  border: 1px solid #eceff3;
+  border-radius: 10px;
+  box-shadow:
+    0 1px 2px rgb(16 24 40 / 6%),
+    0 4px 12px rgb(16 24 40 / 6%);
 }
 
 .sync-preview__detail {
@@ -624,36 +829,47 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
+/* 字段名（摘要 / 作者 / 原文链接 / 留言）：加深到中性深灰并略加字重，与取值拉开层次又都清晰可读 */
 .sync-preview__detail-label {
   flex: none;
-  width: 52px;
-  color: #9ca3af;
+  width: 56px;
+  font-weight: 500;
+  color: #4b5563;
 }
 
 .sync-preview__detail-value {
   flex: 1;
-  color: #374151;
+  color: #1f2937;
   word-break: break-all;
 }
 
 .sync-preview__detail-value--muted {
-  color: #9ca3af;
+  color: #4b5563;
 }
 
-/* 原文链接沿用微信图文链接色（#576b95），可点击在新窗口核实 */
+/* 原文链接：沿用微信图文链接色系但加深一档（原 #576b95 偏淡），悬停加下划线点明可点击 */
 .sync-preview__detail-link {
   flex: 1;
-  color: #576b95;
+  color: #3f5a8c;
   word-break: break-all;
+}
+
+.sync-preview__detail-link:hover {
+  text-decoration: underline;
 }
 
 /* 正文预览卡片：占满预览区可用宽度（窄屏自适应 100%），贴齐微信图文的观感 */
 .sync-preview__phone {
   width: 100%;
-  padding: 20px 14px;
+  /* 左右留白放宽到 18px，贴近公众号图文的正文边距 */
+  padding: 22px 18px;
   background: #fff;
-  border-radius: 6px;
-  box-shadow: 0 1px 4px rgb(0 0 0 / 8%);
+  /* 细边框 + 双层软阴影：白卡片压在浅灰底上时边界清晰、层级立得住 */
+  border: 1px solid #eceff3;
+  border-radius: 10px;
+  box-shadow:
+    0 1px 2px rgb(16 24 40 / 6%),
+    0 4px 12px rgb(16 24 40 / 6%);
 }
 
 /* 与微信图文标题观感一致（对齐美化器对正文 H1 的处理）；下边距交给下方分隔线统一控制 */
@@ -666,18 +882,25 @@ onBeforeUnmount(() => {
   text-align: center;
 }
 
+/* 分段渲染哨兵：紧贴正文末尾、无视觉呈现，仅用于触发下一批正文的追加 */
+.sync-preview__sentinel {
+  height: 1px;
+  margin-top: -1px;
+}
+
 /* 标题与正文的分隔线：中段稍深、两端渐隐的浅灰细线——比正文块级间距更能明确切分标题区与正文区，
    又因两端渐隐、颜色只到中性灰（不到正文黑）而保持克制，不抢标题与正文的视觉焦点 */
 .sync-preview__divider {
   height: 1px;
   margin: 18px 0 22px;
+  /* 中段加深到 #b6c1ce：原 #c3cbd6 在白底上几乎看不见，切分不出标题区与正文区 */
   background: linear-gradient(
     to right,
-    rgb(203 213 225 / 0%),
-    #cbd5e1 18%,
-    #c3cbd6 50%,
-    #cbd5e1 82%,
-    rgb(203 213 225 / 0%)
+    rgb(182 193 206 / 0%),
+    #c2ccd8 18%,
+    #b6c1ce 50%,
+    #c2ccd8 82%,
+    rgb(182 193 206 / 0%)
   );
 }
 
@@ -688,7 +911,8 @@ onBeforeUnmount(() => {
   margin-left: 4px;
   font-size: 11px;
   line-height: 16px;
-  color: #b45309;
+  /* 小字号标识对比度要求更高：由 #b45309 加深到琥珀深色调 */
+  color: #92400e;
   vertical-align: middle;
   background: #fef3c7;
   border-radius: 3px;
@@ -710,12 +934,22 @@ onBeforeUnmount(() => {
   word-break: break-all;
 }
 
+/* 长度结论带状态符号：不看颜色也能分辨「已截断 / 在限制内」 */
 .sync-preview__limits--warn {
-  color: #b45309;
+  color: #92400e;
+}
+
+.sync-preview__limits--warn::before {
+  content: '⚠ ';
 }
 
 .sync-preview__limits--ok {
-  color: #9ca3af;
+  color: #4b5563;
+}
+
+.sync-preview__limits--ok::before {
+  content: '✓ ';
+  color: #07c160;
 }
 
 .sync-preview__footer {
@@ -723,7 +957,7 @@ onBeforeUnmount(() => {
   gap: 12px;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 20px;
+  padding: 14px 20px;
   border-top: 1px solid #e5e7eb;
   /* 触摸滑动不从底栏透传到背后列表 */
   touch-action: none;
@@ -731,7 +965,7 @@ onBeforeUnmount(() => {
 
 .sync-preview__hint {
   font-size: 12px;
-  color: #9ca3af;
+  color: #525b66;
 }
 
 .sync-preview__actions {
@@ -740,22 +974,24 @@ onBeforeUnmount(() => {
   gap: 8px;
 }
 
-/* 「复制正文」用微信绿描边 + 浅绿底，与「取消（默认灰）/ 确认同步（主色）」区分开 */
+/* 「复制正文」：中等饱和的绿填充 + 深绿字，与「取消（默认灰）/ 确认同步（主色实心）」区分。
+   刻意不与主按钮同为实心填充——它是同步失败时的兜底出口，视觉重量低于主操作，
+   避免两个同级实心按钮并列削弱「确认同步」的引导性 */
 .sync-preview__copy {
-  color: #07c160;
-  background-color: #f0fdf4;
-  border-color: #b7ebcd;
+  color: #046c3c;
+  background-color: #b7ead0;
+  border-color: #6ecf9f;
 }
 
 .sync-preview__copy:hover:not(:disabled) {
-  color: #05a850;
-  background-color: #e6fbef;
-  border-color: #8fdcae;
+  color: #03522d;
+  background-color: #a2e2c2;
+  border-color: #3fbe82;
 }
 
 .sync-preview__copy:disabled {
   color: #9ca3af;
-  background-color: #f9fafb;
+  background-color: #f4f5f7;
   border-color: #e5e7eb;
 }
 
@@ -780,11 +1016,22 @@ onBeforeUnmount(() => {
   }
 
   .sync-preview__phone {
-    padding: 20px 12px;
+    padding: 20px 14px;
   }
 }
 
 /* 正文渲染在 .sync-preview__content 的 Shadow DOM 内（与页面样式完全隔离、只按正文自己的
    行内样式渲染），其专属补充样式——代码块渲染、布局表格预览标记——见脚本中的
-   PREVIEW_CONTENT_STYLES 常量 */
+   PREVIEW_CONTENT_CSS 常量 */
+
+/* 系统开启「减少动态效果」时关掉入场与骨架屏动画，只保留静态呈现 */
+@media (prefers-reduced-motion: reduce) {
+  .sync-preview__panel,
+  .sync-preview__sk-title,
+  .sync-preview__sk-byline,
+  .sync-preview__sk-line,
+  .sync-preview__sk-row {
+    animation: none;
+  }
+}
 </style>
