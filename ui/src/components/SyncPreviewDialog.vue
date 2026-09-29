@@ -140,6 +140,10 @@ async function load() {
  *
  * 这里的颜色只影响预览中的可见性（代码块底色、行号、布局表格的预览补线），
  * 与提交到微信的产物无关：正文仍是原样提交，补线不会进入草稿。
+ *
+ * 后端 MCP 预览工具把同一份样式内嵌进返回的 content 字段（见
+ * src/main/java/com/hcjike/wechatofficialsync/content/WechatPreviewStyles.java）——
+ * 那里的客户端（AI 对话界面等）没有本弹窗提供的这层样式。两处样式分别维护，修改时须同步。
  */
 const PREVIEW_CONTENT_CSS = `/* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
    左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），

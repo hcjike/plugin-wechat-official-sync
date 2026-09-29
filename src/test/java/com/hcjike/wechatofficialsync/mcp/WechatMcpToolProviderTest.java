@@ -164,6 +164,31 @@ class WechatMcpToolProviderTest {
     }
 
     @Test
+    void describesWechatLengthRuleForTruncatedFields() {
+        // 截断后的值与文章原文长度不一致，字段说明必须带上微信的计字口径与上限，客户端才能解释「为什么变短」
+        for (String field : List.of("title", "digest", "author", "truncatedFields")) {
+            assertThat(previewFieldDescription(field))
+                .contains("汉字 / 全角字符计 1 字")
+                .contains("0.5 字")
+                .contains("emoji");
+        }
+        assertThat(previewFieldDescription("title")).contains("微信上限 64 字");
+        assertThat(previewFieldDescription("digest")).contains("微信上限 120 字");
+        assertThat(previewFieldDescription("author")).contains("微信上限 8 字");
+        // 截断字段名清单同样写出各字段上限，便于客户端直接说明「哪个字段被截断了」
+        assertThat(previewFieldDescription("truncatedFields"))
+            .contains("title（上限 64 字）")
+            .contains("author（8 字）")
+            .contains("digest（120 字）");
+        // 客户端可能只看工具描述（不解析 outputSchema）：两个会改动草稿字段的工具都要写明该规则
+        assertThat(toolByName(WechatMcpToolProvider.TOOL_PREVIEW).description())
+            .contains("汉字 / 全角字符计 1 字");
+        assertThat(toolByName(WechatMcpToolProvider.TOOL_SUBMIT).description())
+            .contains("汉字 / 全角字符计 1 字")
+            .contains("wechat_sync_preview");
+    }
+
+    @Test
     void previewHandlerReturnsStructuredContentAndSummary() {
         when(mcpSyncService.preview("post-a"))
             .thenReturn(Mono.just(Map.of("title", "文章标题", "content", "<p>正文</p>")));
@@ -302,6 +327,17 @@ class WechatMcpToolProviderTest {
             .block();
         assertThat(result).isInstanceOf(McpToolResult.class);
         return (McpToolResult) result;
+    }
+
+    /** 读取预览工具 outputSchema 中某字段的描述文案（面向 MCP 客户端的契约说明）。 */
+    @SuppressWarnings("unchecked")
+    private String previewFieldDescription(String field) {
+        Map<String, Object> properties =
+            (Map<String, Object>) toolByName(WechatMcpToolProvider.TOOL_PREVIEW).outputSchema()
+                .get("properties");
+        Map<String, Object> property = (Map<String, Object>) properties.get(field);
+        assertThat(property).as("outputSchema 未声明字段：%s", field).isNotNull();
+        return String.valueOf(property.get("description"));
     }
 
     /** 读取工具 outputSchema 声明的必填字段名。 */
