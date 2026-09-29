@@ -140,6 +140,10 @@ async function load() {
  *
  * 这里的颜色只影响预览中的可见性（代码块底色、行号、布局表格的预览补线），
  * 与提交到微信的产物无关：正文仍是原样提交，补线不会进入草稿。
+ *
+ * 后端 MCP 预览工具把同一份样式内嵌进返回的 content 字段（见
+ * src/main/java/com/hcjike/wechatofficialsync/content/WechatPreviewStyles.java）——
+ * 那里的客户端（AI 对话界面等）没有本弹窗提供的这层样式。两处样式分别维护，修改时须同步。
  */
 const PREVIEW_CONTENT_CSS = `/* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
    左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），
@@ -151,9 +155,9 @@ const PREVIEW_CONTENT_CSS = `/* 预览页没有微信图文加载的全局样式
   font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.7;
-  color: #2b2f33;
-  background: #f4f6f8;
-  border: 1px solid #e2e6ec;
+  color: #333;
+  background: #f7f7f7;
+  border: 1px solid #f0f0f0;
   border-radius: 4px;
 }
 
@@ -161,8 +165,7 @@ ul.code-snippet__line-index {
   flex: none;
   padding: 12px 8px;
   margin: 0;
-  /* 行号加深一档：原 #b2b2b2 在浅灰底上几乎看不清，读不出代码行数 */
-  color: #949ca6;
+  color: #b2b2b2;
   text-align: right;
   list-style: none;
   counter-reset: line;
@@ -200,8 +203,7 @@ pre.code-snippet__js code {
 /* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
    预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
 .wechat-layout-table td {
-  /* 补线加深到 #d3dae2：原 #e6e6e6 在白底上太淡，看不出行列结构 */
-  border: 1px solid #d3dae2;
+  border: 1px solid #e6e6e6;
 }
 
 /* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是

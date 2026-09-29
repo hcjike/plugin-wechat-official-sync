@@ -2,6 +2,7 @@ package com.hcjike.wechatofficialsync.mcp;
 
 import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
+import com.hcjike.wechatofficialsync.content.WechatPreviewStyles;
 import com.hcjike.wechatofficialsync.model.SyncRecord;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import com.hcjike.wechatofficialsync.service.WechatCacheCleanupService;
@@ -27,7 +28,8 @@ import run.halo.app.plugin.ReactiveSettingFetcher;
  *
  * <ul>
  *   <li>{@link #preview(String)}：与 {@code POST .../preview} 同一套规则，生成美化后的正文与
- *   草稿元信息（标题 / 摘要 / 作者 / 原文链接 / 留言设置），不调用微信接口、不落库；</li>
+ *   草稿元信息（标题 / 摘要 / 作者 / 原文链接 / 留言设置），并给正文带上预览所需的公共样式
+ *   （见 {@link WechatPreviewStyles}），不调用微信接口、不落库；</li>
  *   <li>{@link #submit(String)}：与 {@code POST .../sync} 同一条路径——先做提交前预检，
  *   通过后落库任务（含输入快照）并交给 {@link WechatSyncTaskRunner} 在后台异步执行；</li>
  *   <li>{@link #status(String)}：与 {@code GET .../status} 同一份任务记录投影，返回该文章最近一次
@@ -107,6 +109,11 @@ public class WechatMcpSyncService {
     /**
      * 生成文章的「同步预览」：美化后的正文 HTML 与上传后实际使用的草稿元信息。
      * 不调用微信接口、不写任务记录，可反复调用。
+     *
+     * <p>{@code content} 在美化结果之外还内嵌了预览所需的公共样式（见
+     * {@link WechatPreviewStyles}）：MCP 客户端（AI 对话界面等）不像 Console 预览弹窗那样有宿主页面
+     * 提供的补充样式，代码块行号与分栏/画廊布局表格会渲染不出来，故由服务端一并下发；这段样式只影响
+     * 预览渲染，提交到微信的草稿仍是纯行内样式的正文。</p>
      */
     public Mono<Map<String, Object>> preview(String postName) {
         return buildRequest(postName)
@@ -116,7 +123,22 @@ public class WechatMcpSyncService {
                 .flatMap(setting -> settingFetcher.fetch(BeautifySetting.GROUP, BeautifySetting.class)
                     // 未配置「正文美化」分组时用内置默认值，保证与真实同步的美化结果一致
                     .defaultIfEmpty(new BeautifySetting())
-                    .flatMap(beautify -> syncService.preview(request, setting, beautify))));
+                    .flatMap(beautify -> syncService.preview(request, setting, beautify)))
+                .map(WechatMcpSyncService::withPreviewStyles));
+    }
+
+    /**
+     * 给预览结果中的 {@code content} 带上公共预览样式（其余字段原样保留）。
+     *
+     * <p>复制一份再改写：美化结果由 {@link WechatSyncService#preview} 产出，不在这里就地修改，
+     * 避免影响调用方的既有对象。</p>
+     */
+    private static Map<String, Object> withPreviewStyles(Map<String, Object> preview) {
+        Map<String, Object> decorated = new LinkedHashMap<>(preview);
+        if (decorated.get("content") instanceof String content) {
+            decorated.put("content", WechatPreviewStyles.withPreviewStyles(content));
+        }
+        return decorated;
     }
 
     /**

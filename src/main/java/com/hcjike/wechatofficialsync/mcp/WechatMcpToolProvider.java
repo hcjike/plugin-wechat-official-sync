@@ -85,6 +85,21 @@ public class WechatMcpToolProvider implements McpToolProvider {
     /** 日志中只记长度、绝不输出取值的结构化结果字段（正文类内容体）。 */
     private static final Set<String> REDACTED_RESULT_FIELDS = Set.of("content");
 
+    /**
+     * 微信草稿字段的「计字口径 + 截断规则」说明，写进工具描述与 {@code outputSchema} 的字段描述。
+     *
+     * <p>截断后的字段值（{@code title} / {@code digest} / {@code author}）与文章里的原文长度不一致，
+     * 若只写「微信上限 64 字」这类结果，MCP 客户端（AI 助手）无法向用户解释「为什么变短了、会不会掉字」；
+     * 因此把规则一并写入描述，让客户端能自行判断与说明。</p>
+     *
+     * <p>计字口径与 {@code WechatSyncService#truncateToWechatLength} 的实现严格一致（公众号编辑器口径：
+     * 汉字 / 全角字符计 1 个字、半角字符计 0.5 个字、emoji 等增补字符计 2 个字，按码点整体取舍），
+     * 修改截断逻辑时须同步这里的文案。</p>
+     */
+    private static final String WECHAT_LENGTH_RULE =
+        "长度按微信计字口径折算：汉字 / 全角字符计 1 字、半角字符（英文字符、数字、符号）计 0.5 字、"
+            + "emoji 等增补字符计 2 字，按整字符取舍（不会把 emoji 截成半个）；超出上限的部分会被自动截断";
+
     private final WechatMcpSyncService mcpSyncService;
 
     private final AuthenticationTrustResolver authTrustResolver = new AuthenticationTrustResolverImpl();
@@ -103,9 +118,12 @@ public class WechatMcpToolProvider implements McpToolProvider {
         return McpToolDefinition.builder()
             .name(TOOL_PREVIEW)
             .title("获取微信同步预览")
-            .description("生成 Halo 文章同步到微信公众号后的预览信息，包括：美化后的正文 HTML、"
+            .description("生成 Halo 文章同步到微信公众号后的预览信息，包括：美化后的正文 HTML"
+                + "（已内嵌渲染所需的公共样式，可在支持 HTML 的客户端中直接渲染）、"
                 + "上传后实际使用的标题（微信上限 64 字）、摘要（120 字）、作者（8 字）、"
-                + "原文链接（阅读原文）与留言设置，以及因超过微信长度上限被截断的字段名。"
+                + "原文链接（阅读原文）与留言设置，以及因超过微信长度上限被截断的字段名（在"
+                + " truncatedFields 中列出）。标题 / 摘要 / 作者取的就是写入草稿的值——"
+                + WECHAT_LENGTH_RULE + "。"
                 + "不调用微信接口、不写入任何数据，可反复调用。")
             .displayTitle("获取微信同步预览")
             .displayDescription("按同步规则生成文章的微信图文预览与草稿元信息，不调用微信接口、不提交任务。")
@@ -126,7 +144,10 @@ public class WechatMcpToolProvider implements McpToolProvider {
             .description("把 Halo 文章提交同步到微信公众号草稿箱：先做提交前预检（微信配置是否可用、"
                 + "文章是否设置了封面、文章是否正在同步中），通过后创建后台同步任务并立即返回。"
                 + "同步过程中封面与正文图片会自动转存到微信素材库，正文按公众号排版规则美化，"
-                + "完成后可在公众号草稿箱看到草稿。同一篇文章在「同步中」时重复提交会被拒绝。")
+                + "完成后可在公众号草稿箱看到草稿。标题（微信上限 64 字）/ 作者（8 字）/ 摘要（120 字）"
+                + "超长时不会提交失败，而是先被自动截断再提交（" + WECHAT_LENGTH_RULE
+                + "；可用 wechat_sync_preview 查看截断后的值与 truncatedFields）。"
+                + "同一篇文章在「同步中」时重复提交会被拒绝。")
             .displayTitle("提交同步到微信")
             .displayDescription("预检通过后创建后台同步任务，把文章同步到微信公众号草稿箱。")
             .inputSchema(postNameSchema("要同步的 Halo 文章 metadata.name（文章列表中的文章标识）"))
@@ -206,19 +227,28 @@ public class WechatMcpToolProvider implements McpToolProvider {
      * 预览工具的输出结构：与 {@link WechatMcpSyncService#preview} 返回的字段一一对应
      * （MCP Server 会按该 Schema 校验成功结果的 {@code structuredContent}，声明后即成为稳定契约；
      * 这里不限制 {@code additionalProperties}，便于后续在不破坏契约的前提下补充字段）。
+     *
+     * <p>三个会被微信截断的字段（{@code title} / {@code digest} / {@code author}）与截断清单
+     * {@code truncatedFields} 的描述里都写明了微信的计字口径与长度上限（见
+     * {@link #WECHAT_LENGTH_RULE}）：客户端拿到的值可能比文章里的原文短，描述须自带判断依据。</p>
      */
     private static Map<String, Object> previewOutputSchema() {
         return Map.of(
             "type", "object",
             "properties", Map.of(
                 "content", Map.of("type", "string",
-                    "description", "美化后的正文 HTML（提交到微信草稿后的大致效果）"),
+                    "description", "美化后的正文 HTML（提交到微信草稿后的大致效果）；开头附带预览所需的"
+                        + "公共样式块（代码块行号、分栏/画廊布局表格标记），供支持 HTML 的客户端直接渲染，"
+                        + "该样式不会提交到微信草稿"),
                 "title", Map.of("type", "string",
-                    "description", "上传后实际使用的标题（已按微信 64 字上限截断）"),
+                    "description", "上传后实际使用的标题（即写入草稿的值）：微信上限 64 字，"
+                        + WECHAT_LENGTH_RULE + "；被截断时字段名会出现在 truncatedFields"),
                 "digest", Map.of("type", "string",
-                    "description", "上传后实际使用的摘要（120 字上限），空表示未填写摘要"),
+                    "description", "上传后实际使用的摘要（即写入草稿的值）：微信上限 120 字，"
+                        + WECHAT_LENGTH_RULE + "；空表示未填写摘要（微信默认抓取正文前 54 个字）"),
                 "author", Map.of("type", "string",
-                    "description", "上传后实际使用的作者（8 字上限），空表示未设置"),
+                    "description", "上传后实际使用的作者（即写入草稿的值）：微信上限 8 字，"
+                        + WECHAT_LENGTH_RULE + "；空表示未设置"),
                 "sourceUrl", Map.of("type", "string",
                     "description", "草稿「阅读原文」链接，空表示不会生成该入口"),
                 "commentMode", Map.of("type", "string",
@@ -226,7 +256,9 @@ public class WechatMcpToolProvider implements McpToolProvider {
                 "truncatedFields", Map.of(
                     "type", "array",
                     "items", Map.of("type", "string"),
-                    "description", "因超过微信长度上限被自动截断的字段名：title / author / digest")),
+                    "description", "因超过微信长度上限被自动截断的字段名：title（上限 64 字）/ author（8 字）"
+                        + " / digest（120 字）；" + WECHAT_LENGTH_RULE
+                        + "，预览中这些字段的取值即最终写入草稿的值")),
             "required", List.of("content", "title", "digest", "author", "sourceUrl",
                 "commentMode", "truncatedFields"));
     }

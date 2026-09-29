@@ -80,6 +80,24 @@ class WechatMcpSyncServiceTest {
     }
 
     @Test
+    void previewCarriesPublicPreviewStylesInContent() {
+        givenPost();
+        givenSettings();
+        when(syncService.preview(any(), any(), any()))
+            .thenReturn(Mono.just(Map.of("title", "文章标题", "content", "<p>美化后正文</p>")));
+
+        Map<String, Object> result = mcpSyncService.preview("post-a").block();
+
+        // content 带上公共预览样式（MCP 客户端没有 Console 预览弹窗提供的补充样式），美化结果原样保留
+        assertThat((String) result.get("content"))
+            .startsWith("<style>")
+            .contains(".code-snippet__fix")
+            .endsWith("<p>美化后正文</p>");
+        // 只改写 content：其余字段原样透传，仍与 MCP 工具声明的 outputSchema 对齐
+        assertThat(result).containsEntry("title", "文章标题");
+    }
+
+    @Test
     void previewFallsBackToRawContentWhenRenderedContentBlank() {
         givenPost();
         givenSettings();
