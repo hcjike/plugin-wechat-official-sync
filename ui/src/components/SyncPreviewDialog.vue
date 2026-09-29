@@ -151,9 +151,9 @@ const PREVIEW_CONTENT_CSS = `/* 预览页没有微信图文加载的全局样式
   font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
   font-size: 13px;
   line-height: 1.7;
-  color: #2b2f33;
-  background: #f4f6f8;
-  border: 1px solid #e2e6ec;
+  color: #333;
+  background: #f7f7f7;
+  border: 1px solid #f0f0f0;
   border-radius: 4px;
 }
 
@@ -161,8 +161,7 @@ ul.code-snippet__line-index {
   flex: none;
   padding: 12px 8px;
   margin: 0;
-  /* 行号加深一档：原 #b2b2b2 在浅灰底上几乎看不清，读不出代码行数 */
-  color: #949ca6;
+  color: #b2b2b2;
   text-align: right;
   list-style: none;
   counter-reset: line;
@@ -200,8 +199,7 @@ pre.code-snippet__js code {
 /* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
    预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
 .wechat-layout-table td {
-  /* 补线加深到 #d3dae2：原 #e6e6e6 在白底上太淡，看不出行列结构 */
-  border: 1px solid #d3dae2;
+  border: 1px solid #e6e6e6;
 }
 
 /* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
