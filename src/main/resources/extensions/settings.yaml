@@ -19,16 +19,16 @@ spec:
           requiredKeys:
             - key: appSecret
               help: 公众平台「设置与开发 - 基本配置」中的开发者密码（AppSecret）
-          help: AppSecret 由 Halo Secret 统一托管，此处仅保存 Secret 名称，不以明文写入插件配置
+          help: 由 Halo Secret 托管，这里只保存 Secret 名称、不保存明文
         - $formkit: text
           name: baseUrl
           label: 代理接口地址
-          help: 选填。留空则直连微信官方接口；需经反向代理转发时填写代理地址，配置说明详见 README「接口地址与反向代理」。
+          help: 选填。留空直连微信官方接口；无固定公网 IP 时可填自建反向代理地址（见 README）
           value: ""
         - $formkit: text
           name: author
           label: 默认作者
-          help: 同步到公众号时展示的作者名，留空则使用文章作者。微信限制作者名不超过 8 个字（按编辑器计字：汉字 1 字、半角字符 0.5 字、emoji 2 字，超过会被接口拒绝），超长会被自动截断并记录日志，建议直接控制在 8 字以内。
+          help: 同步到公众号的作者名，留空用文章作者。微信上限 8 个字，超长自动截断
           value: ""
         - $formkit: select
           name: commentMode
@@ -42,18 +42,26 @@ spec:
               label: 所有人可留言
             - value: "fans"
               label: 已关注的人可留言
-          help: 同步生成的草稿的留言权限；「已关注 7 天及以上」仅支持在公众号后台设置
+          help: 草稿的留言权限；「已关注 7 天及以上」需在公众号后台设置
         - $formkit: textarea
           name: imageHostAllowlist
           label: 图片下载白名单
-          help: 选填。默认拒绝下载内网/环回等受限地址的图片（防 SSRF）。内网部署导致同步失败时，可按行添加信任目标放行：域名、*.子域、IP 或 CIDR（如 192.168.0.0/16）。留空最安全。
+          help: 选填。默认拒绝下载内网、环回地址的图片（防 SSRF）；内网部署时每行填一个域名、IP 或 CIDR 放行，留空最安全
           value: ""
+        - $formkit: switch
+          onValue: true
+          offValue: false
+          name: updateExistingDraft
+          id: updateExistingDraft
+          label: 重复同步更新草稿
+          value: true
+          help: 开启：再次同步时更新上次写入的那份草稿（已不在则新建）；关闭：每次都新建一份草稿
         - $formkit: number
           name: cacheRetentionDays
           id: cacheRetentionDays
           label: 缓存保留天数
           value: 30
-          help: 素材缓存会随同步不断累积，超过保留期且未被使用的记录由每天 0 点的清理任务删除（清理时间固定，不可配置）。保留期按「最近一次使用时间」计算——某张图只要还会被同步命中，计时就会刷新，不会被误删；被清理的都是确实已不再使用的缓存。填写保留天数（默认 30）；留空、0 或负数表示「全部保留」（数据库会持续增长）。
+          help: 默认 30 天；留空、0 或负数表示全部保留。每天 0 点自动清理超过保留期且未被使用的缓存
     - group: beautify
       label: 正文美化
       formSchema:
@@ -79,11 +87,11 @@ spec:
               label: 显示链接地址
             - value: "content"
               label: 显示链接内容
-          help: 仅对无法提交到微信的正文链接（pdf、zip 等非图片附件——微信图文外链点不开、文件也无法转存）生效：插件会把这类链接改为纯文本，此处决定显示原始地址（如 /upload/2026/09/manual.pdf）还是链接自身的文字（如「下载手册」）。
+          help: pdf、zip 等无法提交到微信的附件链接会显示为纯文本，这里选择显示原始地址还是链接自身的文字
         - $formkit: color
           name: inlineCodeColor
           label: 行内代码颜色
-          help: 行内 code 的文字颜色（默认对齐微信图文经典风格）
+          help: 行内 code 的文字颜色
           value: "#d14"
           validation: required
         - $formkit: color
@@ -99,17 +107,17 @@ spec:
           id: blockquoteBorderEnabled
           label: 引用块显示边框
           value: true
-          help: 关闭后引用块不显示左侧强调边框（边框颜色见下方「引用块边框颜色」）
+          help: 关闭后引用块不显示左侧边框（颜色见下方「引用块边框颜色」）
         - $formkit: color
           name: themeColor
           label: 引用块边框颜色
-          help: 引用块左侧强调边框的颜色
+          help: 引用块左侧边框的颜色
           value: "#07c160"
           validation: required
         - $formkit: color
           name: blockquoteBgColor
           label: 引用块背景色
-          help: 引用块（含块内文字区域）的背景颜色
+          help: 引用块的背景颜色
           value: "#f7f7f7"
           validation: required
         - $formkit: switch
@@ -119,7 +127,7 @@ spec:
           id: headingBorderEnabled
           label: 标题显示边框
           value: false
-          help: 开启后 H2–H6 标题显示左侧强调边框（H1 不加边框），边框颜色由下方各级「标题边框颜色」决定
+          help: 开启后 H2–H6 标题显示左侧边框（H1 不加），颜色由下方各级「标题边框颜色」决定
         - $formkit: color
           name: h1Color
           label: 一级标题颜色
@@ -138,7 +146,7 @@ spec:
               label: 居中
             - value: "right"
               label: 右对齐
-          help: H1 标题的对齐方式，默认居中；若正文中的 H1 已自带对齐方式（行内 text-align 或 align 属性），则保持原样、本项对其不生效
+          help: H1 标题的对齐方式；H1 已自带对齐方式时保持原样、本项不生效
         - $formkit: color
           name: h2Color
           label: 二级标题颜色
@@ -148,7 +156,7 @@ spec:
         - $formkit: color
           name: h2BorderColor
           label: 二级标题边框颜色
-          help: H2 标题左侧强调边框的颜色（需开启「标题显示边框」）
+          help: H2 标题左侧边框颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
         - $formkit: color
@@ -160,7 +168,7 @@ spec:
         - $formkit: color
           name: h3BorderColor
           label: 三级标题边框颜色
-          help: H3 标题左侧强调边框的颜色（需开启「标题显示边框」）
+          help: H3 标题左侧边框颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
         - $formkit: color
@@ -172,7 +180,7 @@ spec:
         - $formkit: color
           name: h4BorderColor
           label: 四级标题边框颜色
-          help: H4 标题左侧强调边框的颜色（需开启「标题显示边框」）
+          help: H4 标题左侧边框颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
         - $formkit: color
@@ -184,7 +192,7 @@ spec:
         - $formkit: color
           name: h5BorderColor
           label: 五级标题边框颜色
-          help: H5 标题左侧强调边框的颜色（需开启「标题显示边框」）
+          help: H5 标题左侧边框颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
         - $formkit: color
@@ -196,49 +204,49 @@ spec:
         - $formkit: color
           name: h6BorderColor
           label: 六级标题边框颜色
-          help: H6 标题左侧强调边框的颜色（需开启「标题显示边框」）
+          help: H6 标题左侧边框颜色（需开启「标题显示边框」）
           value: "#07c160"
           validation: required
         - $formkit: color
           name: detailsTitleBgColor
           label: 折叠块标题背景色
-          help: 折叠块（Halo 折叠内容）标题栏的背景颜色，标题文字保持深色
+          help: 折叠块（Halo 折叠内容）标题栏的背景色
           value: "#f7f7f7"
           validation: required
         - $formkit: color
           name: detailsContentBgColor
           label: 折叠块内容背景色
-          help: 折叠块内容区的背景颜色
+          help: 折叠块内容区的背景色
           value: "#ffffff"
           validation: required
         - $formkit: color
           name: detailsBorderColor
           label: 折叠块边框颜色
-          help: 折叠块卡片的边框与标题栏分隔线颜色
+          help: 折叠块卡片边框与标题栏分隔线的颜色
           value: "#e6e6e6"
           validation: required
         - $formkit: color
           name: mediaCardBgColor
           label: 视频/音频卡片背景色
-          help: 微信不支持正文内嵌视频与音乐，编辑器插入的视频、音频同步时会重建为提示卡片（▶ 视频 / ♪ 音频 +「阅读原文」引导语）；此项控制卡片背景色
+          help: 微信不支持正文内嵌视频与音乐，这类内容会重建为提示卡片；此项是卡片背景色
           value: "#f7f7f7"
           validation: required
         - $formkit: color
           name: mediaCardTitleColor
           label: 视频/音频卡片主行颜色
-          help: 提示卡片主行「▶ 视频」/「♪ 音频」的文字颜色
+          help: 卡片主行「▶ 视频」/「♪ 音频」的文字颜色
           value: "#333333"
           validation: required
         - $formkit: color
           name: mediaCardHintColor
           label: 视频/音频卡片引导语颜色
-          help: 提示卡片引导语「请点击文末『阅读原文』观看/收听」的文字颜色
+          help: 卡片引导语「请点击文末『阅读原文』观看/收听」的文字颜色
           value: "#999999"
           validation: required
         - $formkit: color
           name: mediaCardMarkerColor
           label: 视频/音频卡片标记颜色
-          help: 提示卡片标记符号「▶」/「♪」的颜色
+          help: 卡片标记符号「▶」/「♪」的颜色
           value: "#07c160"
           validation: required
         - $formkit: select
@@ -251,7 +259,7 @@ spec:
               label: 保持比例
             - value: "fill"
               label: 宽度铺满
-          help: 保持比例：按文章表格的原始列宽比例渲染，列宽超出屏幕时可在微信里横向滚动查看全貌（推荐）；宽度铺满：列宽按比例压缩进屏幕，表格始终铺满微信屏宽、不产生横向滚动。
+          help: 保持比例：按原始列宽渲染，超宽时可在微信里横向滚动（推荐）；宽度铺满：列宽压缩进屏宽、不横向滚动
         - $formkit: select
           name: columnsLayoutStyle
           id: columnsLayoutStyle
@@ -262,7 +270,7 @@ spec:
               label: 表格
             - value: "stacked"
               label: 独占一行
-          help: 表格：分栏卡片各列并排（重建为微信兼容的表格布局，推荐）；独占一行：不重建表格，每栏各占一行，栏内内容照常保留。
+          help: 表格：各列并排（推荐）；独占一行：每栏各占一行
         - $formkit: select
           name: galleryLayoutStyle
           id: galleryLayoutStyle
@@ -273,4 +281,4 @@ spec:
               label: 表格
             - value: "stacked"
               label: 独占一行
-          help: 表格：画廊多图并排（重建为一张整体表格、所有列等宽，推荐）；独占一行：不重建表格，每张图片各占一行，图片与描述内容照常保留。
+          help: 表格：多图并排（推荐）；独占一行：每张图各占一行

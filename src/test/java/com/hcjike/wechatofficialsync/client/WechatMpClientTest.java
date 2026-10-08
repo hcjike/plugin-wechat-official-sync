@@ -167,6 +167,76 @@ class WechatMpClientTest {
     }
 
     @Test
+    void draftExistsPostsMediaIdAndDetectsExistingDraft() {
+        server.plan("{\"news_item\":[{\"title\":\"hello\"}],\"create_time\":1700000000}");
+
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "DRAFT-1").block()).isTrue();
+
+        RecordedRequest request = server.lastRequest();
+        assertThat(request.uri()).contains("/cgi-bin/draft/get").contains("access_token=TOKEN");
+        assertThat(request.bodyText()).contains("\"media_id\"").contains("DRAFT-1");
+    }
+
+    @Test
+    void draftExistsIsFalseUnlessDraftDetailsAreReturned() {
+        // 草稿已被删除、或 media_id 不属于本公众号：微信返回 40007 invalid media_id
+        server.plan("{\"errcode\":40007,\"errmsg\":\"invalid media_id\"}");
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "DRAFT-1").block()).isFalse();
+
+        // 成功响应里没有 news_item：拿不到「草稿仍在」的证据，按不存在处理
+        server.plan("{\"errcode\":0,\"errmsg\":\"ok\"}");
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "DRAFT-1").block()).isFalse();
+
+        // 代理没转发该接口（返回错误页）：校验失败不能打断同步，一律按「不存在」处理
+        server.planStatus(404, "<html>404 Not Found</html>");
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "DRAFT-1").block()).isFalse();
+
+        // 2xx 但响应不是 JSON：同样按不存在处理
+        server.planStatus(200, "<html>proxy error</html>");
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "DRAFT-1").block()).isFalse();
+    }
+
+    @Test
+    void draftExistsSkipsRequestWhenMediaIdIsBlank() {
+        // 没有 id 可查：谈不上「存在」，且不发起任何请求
+        assertThat(client.draftExists(server.baseUrl(), "TOKEN", "  ").block()).isFalse();
+        assertThat(server.requestCount()).isZero();
+    }
+
+    @Test
+    void updateDraftPostsSingleArticleWithMediaIdAndIndex() {
+        server.plan("{\"errcode\":0,\"errmsg\":\"ok\"}");
+
+        String mediaId =
+            client.updateDraft(server.baseUrl(), "TOKEN", "DRAFT-1", Map.of("title", "hello")).block();
+
+        // 更新成功：草稿还是原来那一份，media_id 不变
+        assertThat(mediaId).isEqualTo("DRAFT-1");
+        RecordedRequest request = server.lastRequest();
+        assertThat(request.uri()).contains("/cgi-bin/draft/update").contains("access_token=TOKEN");
+        assertThat(request.contentType()).startsWith("application/json");
+        // draft/update 的 articles 是「单个对象」（不是 draft/add 的数组），并带 media_id 与 index
+        assertThat(request.bodyText())
+            .contains("\"media_id\":\"DRAFT-1\"")
+            .contains("\"index\":0")
+            .contains("\"articles\":{")
+            .contains("hello");
+    }
+
+    @Test
+    void updateDraftCarriesErrcodeWhenRejected() {
+        // 草稿已被删除、或草稿引用的封面素材已失效：draft/update 以 40007 拒绝
+        server.plan("{\"errcode\":40007,\"errmsg\":\"invalid media_id hint: [abc]\"}");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.updateDraft(server.baseUrl(), "TOKEN", "DRAFT-1", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        assertThat(error).hasMessageContaining("更新公众号草稿失败");
+        assertThat(error.isInvalidMediaId()).isTrue();
+    }
+
+    @Test
     void permanentImageUploadReturnsMediaIdAndImageUrl() {
         // 图片类型的 add_material 会同时返回 media_id 与素材图片 url（url 仅留档：素材被删后它往往仍可访问）
         server.plan("{\"media_id\":\"COVER_MEDIA_ID\",\"url\":\"https://mmbiz.qpic.cn/mmbiz_jpg/cover.jpg\"}");

@@ -426,6 +426,63 @@ public class WechatMpClient {
     }
 
     /**
+     * 判断已有图文草稿是否仍然存在（重复同步时据此决定「更新草稿」还是「新建草稿」）。
+     *
+     * <p>走 {@code draft/get}：草稿仍在时返回带 {@code news_item} 的草稿详情；草稿已被删除、或
+     * {@code media_id} 不属于本公众号时微信返回 {@code {"errcode":40007,...}}。</p>
+     *
+     * <p><b>只有明确取回草稿详情才判「存在」</b>，其余情况——错误码、没有 {@code news_item}、
+     * 代理未转发该接口（返回 HTML / 404）、限流、网络异常——一律判<b>不存在</b>：本判定只用于选择
+     * 「更新」还是「新建」，判成不存在的代价只是多出一份草稿，而误判「存在」会让整次同步失败
+     * （调用方按「检查草稿出错就重新发布」的约定处理）。</p>
+     */
+    public Mono<Boolean> draftExists(String apiBase, String token, String mediaId) {
+        if (isBlank(mediaId)) {
+            // 没有 id 可查：谈不上「存在」，按不存在处理（调用方走新建草稿）
+            return Mono.just(false);
+        }
+        return webClient.post()
+            .uri(apiBase + "/cgi-bin/draft/get?access_token={token}", token)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(Map.of("media_id", mediaId))
+            .retrieve()
+            .bodyToMono(String.class)
+            .defaultIfEmpty("")
+            .map(this::existingDraft)
+            .onErrorResume(e -> {
+                // 任何异常（代理未转发返回 404、限流、网络异常等）都不打断同步：按「不存在」处理
+                log.info("校验草稿 [{}] 是否存在失败，按「不存在」处理（改为新建草稿）：{}", mediaId,
+                    SensitiveText.mask(e.getMessage()));
+                return Mono.just(false);
+            });
+    }
+
+    /**
+     * 由 {@code draft/get} 的响应体判定草稿是否仍在：只有拿到带 {@code news_item} 的成功响应才算存在；
+     * 响应不是 JSON（代理返回 HTML 错误页）、带错误码、或没有 {@code news_item} 时一律判不存在。
+     */
+    private boolean existingDraft(String text) {
+        Map<String, Object> body;
+        try {
+            body = parseMap(text);
+        } catch (RuntimeException e) {
+            log.info("校验草稿是否存在：响应不是微信 JSON（代理未转发该接口？），按「不存在」处理，改为新建草稿");
+            return false;
+        }
+        Object errcode = body.get("errcode");
+        if (errcode != null && !"0".equals(errcode.toString())) {
+            log.info("校验草稿是否存在：微信返回 errcode={}，按「不存在」处理，改为新建草稿", errcode);
+            return false;
+        }
+        Object newsItem = body.get("news_item");
+        if (!(newsItem instanceof List<?> items) || items.isEmpty()) {
+            log.info("校验草稿是否存在：响应里没有草稿内容，按「不存在」处理，改为新建草稿");
+            return false;
+        }
+        return true;
+    }
+
+    /**
      * 新建图文草稿，返回草稿 media_id。
      *
      * <p>失败时把微信返回的 {@code errcode} 一并带进异常：调用方要据此做补救——草稿被 {@code 40007
@@ -448,6 +505,40 @@ public class WechatMpClient {
                 Object errcode = body.get("errcode");
                 return Mono.error(new WechatApiException("创建公众号草稿失败：" + body,
                     errcode == null ? null : errcode.toString()));
+            })
+            .onErrorMap(WechatMpClient::maskSecrets);
+    }
+
+    /**
+     * 更新已有图文草稿（{@code draft/update}），成功时返回<b>传入的同一个</b>草稿 media_id。
+     *
+     * <p>与 {@link #addDraft} 的报文差异：{@code articles} 传<b>单个对象</b>（不是数组），并须带
+     * {@code media_id} 与 {@code index}（更新草稿中的第几篇，本插件每份草稿只有一篇，恒为 {@code 0}）。</p>
+     *
+     * <p>失败时同样把微信返回的 {@code errcode} 带进异常：{@code 40007} 说明该草稿已被删除、
+     * 或草稿引用的封面素材已失效，调用方据此改为新建草稿（见 {@code WechatSyncService}）。</p>
+     */
+    public Mono<String> updateDraft(String apiBase, String token, String mediaId,
+        Map<String, Object> article) {
+        if (isBlank(mediaId)) {
+            return Mono.error(new WechatApiException("更新公众号草稿失败：缺少草稿 media_id"));
+        }
+        return webClient.post()
+            .uri(apiBase + "/cgi-bin/draft/update?access_token={token}", token)
+            .contentType(MediaType.APPLICATION_JSON)
+            .bodyValue(Map.of("media_id", mediaId, "index", 0, "articles", article))
+            .retrieve()
+            .bodyToMono(String.class)
+            .defaultIfEmpty("")
+            .map(this::parseMap)
+            .flatMap(body -> {
+                Object errcode = body.get("errcode");
+                if (errcode == null || "0".equals(errcode.toString())) {
+                    // 更新成功：草稿还是原来那一份，media_id 不变
+                    return Mono.just(mediaId);
+                }
+                return Mono.error(new WechatApiException("更新公众号草稿失败：" + body,
+                    errcode.toString()));
             })
             .onErrorMap(WechatMpClient::maskSecrets);
     }

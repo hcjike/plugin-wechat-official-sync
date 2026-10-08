@@ -65,6 +65,21 @@ public class WechatSyncTaskStore {
     }
 
     /**
+     * 任务开始执行的结果（见 {@link #startAttempt(String, String)}）。
+     *
+     * @param attempts     本次尝试次数；{@code 0} 表示任务记录已不存在（调用方跳过执行）
+     * @param draftMediaId 该文章上次成功同步写入的草稿 media_id（为空表示还没成功同步过）；
+     *                     执行时据此决定「更新既有草稿」还是「新建草稿」
+     */
+    public record Attempt(int attempts, String draftMediaId) {
+
+        /** 任务记录不存在：没有尝试次数、也没有可复用的草稿。 */
+        static Attempt missing() {
+            return new Attempt(0, null);
+        }
+    }
+
+    /**
      * 状态投影：文章 name → 最近一次同步状态，供 Console 文章列表渲染状态列
      * （返回结构与旧版 ConfigMap 记录一致，前端无感知）。
      */
@@ -131,10 +146,11 @@ public class WechatSyncTaskStore {
     }
 
     /**
-     * 任务开始执行：尝试次数 +1（{@code message} 非空时同时更新状态说明），返回最新尝试次数；
-     * 任务记录已不存在时返回 {@code 0}（调用方据此跳过执行）。
+     * 任务开始执行：尝试次数 +1（{@code message} 非空时同时更新状态说明），返回本次尝试次数与该文章
+     * <b>上次成功同步写入的草稿 media_id</b>；任务记录已不存在时返回尝试次数 {@code 0}
+     * （调用方据此跳过执行）。
      */
-    public Mono<Integer> startAttempt(String postName, String message) {
+    public Mono<Attempt> startAttempt(String postName, String message) {
         return withRetry(() -> client.fetch(WechatSyncTask.class, taskName(postName))
             .flatMap(task -> {
                 WechatSyncTask.WechatSyncTaskSpec spec = task.getSpec();
@@ -144,14 +160,18 @@ public class WechatSyncTaskStore {
                 if (message != null && !message.isBlank()) {
                     spec.setMessage(message);
                 }
-                return client.update(task).thenReturn(attempts + 1);
+                return client.update(task)
+                    .thenReturn(new Attempt(attempts + 1, spec.getMediaId()));
             })
-            .defaultIfEmpty(0), MAX_SAVE_ATTEMPTS);
+            .defaultIfEmpty(Attempt.missing()), MAX_SAVE_ATTEMPTS);
     }
 
     /**
      * 任务落到终态：写入状态/说明/mediaId，并清空输入快照——终态后不再需要重放，
      * 清空可避免正文 HTML 长期占用数据库空间。
+     *
+     * <p><b>草稿 media_id 只增不减</b>：失败记录不携带 media_id，此时保留任务上原有的值——
+     * 上次成功同步写入的那份草稿多半仍然存在，保留它，用户重试时才能「更新草稿」而不是又新建一份。</p>
      */
     public Mono<Void> complete(String postName, SyncRecord record) {
         return withRetry(() -> client.fetch(WechatSyncTask.class, taskName(postName))
@@ -160,7 +180,9 @@ public class WechatSyncTaskStore {
                 spec.setStatus(record.getStatus());
                 spec.setMessage(record.getMessage());
                 spec.setTime(record.getTime());
-                spec.setMediaId(record.getMediaId());
+                if (record.getMediaId() != null && !record.getMediaId().isBlank()) {
+                    spec.setMediaId(record.getMediaId());
+                }
                 // 快照清空后就再也拿不到标题了，先补记一次（升级前登记、升级后才落终态的任务靠它补齐）
                 fillTitleFromSnapshot(spec);
                 spec.setRequest(null);
@@ -318,10 +340,21 @@ public class WechatSyncTaskStore {
         return client.listAll(WechatSyncTask.class, ListOptions.builder().build(), Sort.unsorted());
     }
 
-    /** 写入任务：已有同任务名的记录时在其上替换 spec，否则新建。 */
+    /**
+     * 写入任务：已有同任务名的记录时在其上替换 spec，否则新建。
+     *
+     * <p>替换 spec 时<b>保留原有的草稿 media_id</b>（新 spec 未携带时）：重复提交同一篇文章不应该丢掉
+     * 「上次同步写入的是哪份草稿」，否则每次同步都会新建一份草稿、越积越多；保留后执行时即可更新它。</p>
+     */
     private Mono<WechatSyncTask> upsert(WechatSyncTask fresh) {
         return client.fetch(WechatSyncTask.class, fresh.getMetadata().getName())
             .flatMap(existing -> {
+                WechatSyncTask.WechatSyncTaskSpec previous = existing.getSpec();
+                String previousMediaId = previous == null ? null : previous.getMediaId();
+                if ((fresh.getSpec().getMediaId() == null || fresh.getSpec().getMediaId().isBlank())
+                    && previousMediaId != null && !previousMediaId.isBlank()) {
+                    fresh.getSpec().setMediaId(previousMediaId);
+                }
                 existing.setSpec(fresh.getSpec());
                 return client.update(existing);
             })

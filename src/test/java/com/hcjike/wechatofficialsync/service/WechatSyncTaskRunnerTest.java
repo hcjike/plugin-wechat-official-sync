@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -40,16 +41,18 @@ class WechatSyncTaskRunnerTest {
 
     @Test
     void runTaskWritesSuccessWithMediaId() {
-        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(1));
+        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(attempt(1, null)));
         when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
             .thenReturn(Mono.just(new WechatSetting()));
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.just(new BeautifySetting()));
-        when(syncService.submit(any(), any(), any())).thenReturn(Mono.just("media-1"));
+        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("media-1"));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.runTask("post-a", request("文章 A"), null).block();
 
+        // 首次同步（任务上没有已知草稿）：带空 draftMediaId 提交，同步流程直接新建草稿
+        verify(syncService).submit(any(), any(), any(), isNull());
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
@@ -57,14 +60,33 @@ class WechatSyncTaskRunnerTest {
     }
 
     @Test
+    void runTaskPassesPreviousDraftMediaIdToSubmit() {
+        // 重复同步：把任务上记录的草稿 media_id 交给同步流程，由它决定「更新草稿」还是「新建草稿」
+        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(attempt(1, "DRAFT-1")));
+        when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
+            .thenReturn(Mono.just(new WechatSetting()));
+        when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
+            .thenReturn(Mono.just(new BeautifySetting()));
+        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("DRAFT-1"));
+        when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
+
+        runner.runTask("post-a", request("文章 A"), null).block();
+
+        verify(syncService).submit(any(), any(), any(), eq("DRAFT-1"));
+        ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
+        verify(taskStore).complete(eq("post-a"), captor.capture());
+        assertThat(captor.getValue().getMediaId()).isEqualTo("DRAFT-1");
+    }
+
+    @Test
     void runTaskWritesFailureMessageWhenSubmitFails() {
-        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(1));
+        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(attempt(1, null)));
         when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
             .thenReturn(Mono.just(new WechatSetting()));
         // 未配置「正文美化」分组：走内置默认值
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.empty());
-        when(syncService.submit(any(), any(), any()))
+        when(syncService.submit(any(), any(), any(), any()))
             .thenReturn(Mono.error(new WechatApiException("封面图下载失败")));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
@@ -78,23 +100,24 @@ class WechatSyncTaskRunnerTest {
 
     @Test
     void runTaskSkipsWhenTaskRecordMissing() {
-        when(taskStore.startAttempt(eq("post-a"), any())).thenReturn(Mono.just(0));
+        when(taskStore.startAttempt(eq("post-a"), any()))
+            .thenReturn(Mono.just(WechatSyncTaskStore.Attempt.missing()));
 
         runner.runTask("post-a", request("文章 A"), null).block();
 
-        verify(syncService, never()).submit(any(), any(), any());
+        verify(syncService, never()).submit(any(), any(), any(), any());
         verify(taskStore, never()).complete(anyString(), any());
     }
 
     @Test
     void runTaskStopsWhenAttemptsExceeded() {
         when(taskStore.startAttempt(eq("post-a"), any()))
-            .thenReturn(Mono.just(WechatSyncTaskRunner.MAX_ATTEMPTS + 1));
+            .thenReturn(Mono.just(attempt(WechatSyncTaskRunner.MAX_ATTEMPTS + 1, "DRAFT-1")));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.runTask("post-a", request("文章 A"), null).block();
 
-        verify(syncService, never()).submit(any(), any(), any());
+        verify(syncService, never()).submit(any(), any(), any(), any());
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
@@ -102,41 +125,43 @@ class WechatSyncTaskRunnerTest {
 
     @Test
     void resumeInterruptedReplaysPendingTask() {
-        WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING, 1, request("文章 A"));
+        WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING, 1, request("文章 A"), "DRAFT-1");
         when(taskStore.findPending()).thenReturn(Mono.just(List.of(task)));
         // 重放时带「正在自动恢复」的状态说明，供状态列悬停展示
-        when(taskStore.startAttempt(eq("post-a"), contains("自动恢复"))).thenReturn(Mono.just(2));
+        when(taskStore.startAttempt(eq("post-a"), contains("自动恢复")))
+            .thenReturn(Mono.just(attempt(2, "DRAFT-1")));
         when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
             .thenReturn(Mono.just(new WechatSetting()));
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.just(new BeautifySetting()));
-        when(syncService.submit(any(), any(), any())).thenReturn(Mono.just("media-2"));
+        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("DRAFT-1"));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.resumeInterrupted().block();
 
-        // 重放使用的是持久化输入快照：摘要 / 作者 / 原文链接等草稿元信息随快照完整恢复
+        // 重放使用的是持久化输入快照：摘要 / 作者 / 原文链接等草稿元信息随快照完整恢复；
+        // 同时带上该文章上次成功同步的草稿 media_id——那份草稿还在时重放是「更新草稿」而不是又建一份
         ArgumentCaptor<SyncRequest> requestCaptor = ArgumentCaptor.forClass(SyncRequest.class);
-        verify(syncService).submit(requestCaptor.capture(), any(), any());
+        verify(syncService).submit(requestCaptor.capture(), any(), any(), eq("DRAFT-1"));
         assertThat(requestCaptor.getValue().getDigest()).isEqualTo("文章摘要");
         assertThat(requestCaptor.getValue().getAuthor()).isEqualTo("张三");
         assertThat(requestCaptor.getValue().getPermalink()).isEqualTo("/archives/post-a");
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
-        assertThat(captor.getValue().getMediaId()).isEqualTo("media-2");
+        assertThat(captor.getValue().getMediaId()).isEqualTo("DRAFT-1");
     }
 
     @Test
     void resumeInterruptedFailsTaskAtMaxAttemptsWithoutReplaying() {
         WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING,
-            WechatSyncTaskRunner.MAX_ATTEMPTS, request("文章 A"));
+            WechatSyncTaskRunner.MAX_ATTEMPTS, request("文章 A"), null);
         when(taskStore.findPending()).thenReturn(Mono.just(List.of(task)));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.resumeInterrupted().block();
 
-        verify(syncService, never()).submit(any(), any(), any());
+        verify(syncService, never()).submit(any(), any(), any(), any());
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
@@ -145,20 +170,26 @@ class WechatSyncTaskRunnerTest {
 
     @Test
     void resumeInterruptedFailsTaskWithoutSnapshot() {
-        WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING, 0, null);
+        WechatSyncTask task = task("post-a", SyncRecord.STATUS_PENDING, 0, null, null);
         when(taskStore.findPending()).thenReturn(Mono.just(List.of(task)));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.resumeInterrupted().block();
 
-        verify(syncService, never()).submit(any(), any(), any());
+        verify(syncService, never()).submit(any(), any(), any(), any());
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
         assertThat(captor.getValue().getMessage()).contains("缺少任务数据");
     }
 
-    private WechatSyncTask task(String postName, String status, int attempts, SyncRequest request) {
+    /** 任务开始执行的结果：尝试次数 + 上次成功同步写入的草稿 media_id。 */
+    private static WechatSyncTaskStore.Attempt attempt(int attempts, String draftMediaId) {
+        return new WechatSyncTaskStore.Attempt(attempts, draftMediaId);
+    }
+
+    private WechatSyncTask task(String postName, String status, int attempts, SyncRequest request,
+        String draftMediaId) {
         WechatSyncTask task = new WechatSyncTask();
         Metadata metadata = new Metadata();
         metadata.setName(WechatSyncTaskStore.taskName(postName));
@@ -168,6 +199,7 @@ class WechatSyncTaskRunnerTest {
         spec.setStatus(status);
         spec.setAttempts(attempts);
         spec.setRequest(request);
+        spec.setMediaId(draftMediaId);
         task.setSpec(spec);
         return task;
     }

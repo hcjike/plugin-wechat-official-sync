@@ -10,7 +10,11 @@ const VALIDATE_URL = '/apis/api.wechat-sync.halo.run/v1alpha1/validate'
 
 /** 预览接口返回：美化后的正文与上传后实际使用的草稿元信息。 */
 export interface PreviewPayload {
-  /** 美化后的正文 HTML（提交到微信草稿后的大致效果）。 */
+  /**
+   * 美化后的正文 HTML（提交到微信草稿后的大致效果）。
+   * 正文里的图片、链接等相对地址已按站点「外部访问地址」补全为完整链接，
+   * 便于 MCP 等脱离站点的客户端直接加载图片；提交到微信的草稿不受影响。
+   */
   content: string
   /** 草稿标题：按微信 64 字上限截断后的值（与提交到草稿的标题一致）。 */
   title: string

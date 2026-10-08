@@ -21,8 +21,10 @@ import run.halo.app.plugin.ReactiveSettingFetcher;
  * 不落任何凭据）；执行完成（成功/失败）后把终态写回任务记录。</p>
  *
  * <p><b>恢复语义</b>：进程内的响应式任务无法断点续传，插件（或 Halo 服务）重启后的「恢复」
- * 是用持久化的输入从头重放整个同步流程，语义等价于自动帮用户重试了一次；若中断恰好发生在
- * 草稿创建成功与状态写回之间，重放会多出一份草稿。为防服务反复重启导致无限重放，
+ * 是用持久化的输入从头重放整个同步流程，语义等价于自动帮用户重试了一次；重放时会带上该文章
+ * <b>上次成功同步写入的草稿 media_id</b>（见 {@code WechatSyncTaskStore#startAttempt}），
+ * 因此只要那份草稿还在就是「更新草稿」而不是又新建一份。仅当文章从未成功同步过、而中断恰好发生在
+ * 草稿创建成功与状态写回之间时，重放才可能多出一份草稿。为防服务反复重启导致无限重放，
  * 单任务总执行次数上限为 {@value #MAX_ATTEMPTS} 次（首次提交 + 中断后的自动恢复），
  * 达到上限仍被中断的任务不再自动恢复，需手动重新同步。</p>
  *
@@ -78,17 +80,17 @@ public class WechatSyncTaskRunner {
      */
     Mono<Void> runTask(String postName, SyncRequest request, String runningMessage) {
         return taskStore.startAttempt(postName, runningMessage)
-            .flatMap(attempts -> {
-                if (attempts == 0) {
+            .flatMap(attempt -> {
+                if (attempt.attempts() == 0) {
                     // 任务记录已不存在（例如被人工删除）：不再执行
                     log.warn("同步任务 [{}] 记录不存在，跳过执行", postName);
                     return Mono.empty();
                 }
-                if (attempts > MAX_ATTEMPTS) {
+                if (attempt.attempts() > MAX_ATTEMPTS) {
                     return taskStore.complete(postName,
                         SyncRecord.failed("同步任务多次因中断未能完成，已停止自动恢复，请手动重新同步"));
                 }
-                return execute(postName, request);
+                return execute(postName, request, attempt.draftMediaId());
             });
     }
 
@@ -115,15 +117,21 @@ public class WechatSyncTaskRunner {
             });
     }
 
-    /** 按当前设置执行一次完整同步，并把结果写回任务记录。 */
-    private Mono<Void> execute(String postName, SyncRequest request) {
+    /**
+     * 按当前设置执行一次完整同步，并把结果写回任务记录。
+     *
+     * @param draftMediaId 该文章上次成功同步写入的草稿 media_id：非空且插件设置里开启了
+     *                     「重复同步更新草稿」时，同步流程会先校验它是否仍在，在则更新那份草稿、
+     *                     不在（或校验出错）则新建，避免重复同步越积越多草稿；开关关闭时始终新建
+     */
+    private Mono<Void> execute(String postName, SyncRequest request, String draftMediaId) {
         return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
             .switchIfEmpty(Mono.error(new WechatApiException("插件尚未配置微信公众号信息")))
             .flatMap(setting -> settingFetcher
                 .fetch(BeautifySetting.GROUP, BeautifySetting.class)
                 // 未配置「正文美化」分组时用内置默认值，保证美化不中断
                 .defaultIfEmpty(new BeautifySetting())
-                .flatMap(beautify -> syncService.submit(request, setting, beautify)))
+                .flatMap(beautify -> syncService.submit(request, setting, beautify, draftMediaId)))
             .flatMap(mediaId -> {
                 log.info("文章《{}》已同步到公众号草稿箱，media_id={}", request.getTitle(), mediaId);
                 return taskStore.complete(postName, SyncRecord.success(mediaId));

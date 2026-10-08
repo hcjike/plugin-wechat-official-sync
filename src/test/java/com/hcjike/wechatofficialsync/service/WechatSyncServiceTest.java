@@ -515,17 +515,205 @@ class WechatSyncServiceTest {
         verify(client, times(2)).addDraft(anyString(), anyString(), any());
     }
 
-    /** 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存）。 */
-    private String createDraft(WechatMpClient client) {
+    // ---------- 重复同步：优先更新既有草稿 ----------
+    //
+    // 首次同步（任务里没有已知草稿）直接新建草稿；重复同步先校验上次写入的那份草稿是否仍在——
+    // 在则更新（draft/update，草稿 media_id 不变），不在则新建（draft/add）。校验过程发生任何错误
+    // 都按「草稿不存在」处理、直接新建，不因为一次校验失败打断同步；更新被 40007 拒绝（草稿已被删除，
+    // 或草稿引用的封面素材已失效）时同样回退到新建（封面若已失效，新建路径会再触发一次封面重传）。
+
+    @Test
+    void createsNewDraftOnRepeatSyncWhenUpdateExistingDraftDisabled() {
+        // 设置里关闭「重复同步更新草稿」：不做任何校验、也不更新，每次同步都新建一份草稿
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
+
+        assertThat(createDraft(client, "DRAFT-1", false)).isEqualTo("DRAFT-NEW");
+
+        verify(client, never()).draftExists(anyString(), anyString(), anyString());
+        verify(client, never()).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void firstSyncCreatesDraftWithoutCheckingExistingOne() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-1"));
+
+        assertThat(createDraft(client)).isEqualTo("DRAFT-1");
+
+        // 首次同步没有已知草稿：不校验草稿（省掉一次接口调用），直接新建
+        verify(client, never()).draftExists(anyString(), anyString(), anyString());
+        verify(client, never()).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void updatesExistingDraftOnRepeatSync() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(true));
+        when(client.updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any()))
+            .thenReturn(Mono.just("DRAFT-1"));
+
+        assertThat(createDraft(client, "DRAFT-1")).isEqualTo("DRAFT-1");
+
+        // 草稿还在：更新这一份，而不是再新建一份（重复同步不会在草稿箱里越积越多）
+        verify(client, times(1)).updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any());
+        verify(client, never()).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void createsNewDraftWhenExistingDraftIsGone() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-GONE")).thenReturn(Mono.just(false));
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
+
+        assertThat(createDraft(client, "DRAFT-GONE")).isEqualTo("DRAFT-NEW");
+
+        verify(client, never()).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void createsNewDraftWhenDraftCheckFails() {
+        // 校验草稿出错（代理未转发 draft/get、限流、网络异常等）同样按「不存在」处理、直接新建：
+        // 一次校验失败不能打断同步（客户端已把可预期的错误收敛为 false，这里兜底异常信号）
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1"))
+            .thenReturn(Mono.error(new WechatApiException("校验草稿失败")));
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
+
+        assertThat(createDraft(client, "DRAFT-1")).isEqualTo("DRAFT-NEW");
+
+        verify(client, never()).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void createsNewDraftWhenUpdateIsRejectedWithInvalidMediaId() {
+        // 更新被 40007 拒绝：草稿已被删除，或草稿引用的封面素材已失效——改走新建草稿
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(true));
+        when(client.updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any()))
+            .thenReturn(Mono.error(invalidMediaId()));
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
+
+        assertThat(createDraft(client, "DRAFT-1")).isEqualTo("DRAFT-NEW");
+
+        verify(client, times(1)).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void doesNotCreateNewDraftWhenUpdateFailsForUnrelatedReason() {
+        // 与「草稿/封面素材失效」无关的更新失败（如频控 45011）：照原样抛错，不做无谓重试
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(true));
+        when(client.updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any()))
+            .thenReturn(Mono.error(new WechatApiException("更新公众号草稿失败：{errcode=45011}", "45011")));
+
+        assertThatThrownBy(() -> createDraft(client, "DRAFT-1"))
+            .isInstanceOf(WechatApiException.class)
+            .hasMessageContaining("45011");
+
+        verify(client, never()).addDraft(anyString(), anyString(), any());
+    }
+
+    // ---------- 草稿存在性校验（供 MCP 提交前判定本次是更新还是新建） ----------
+
+    @Test
+    void existingDraftExistsReturnsFalseWithoutDraftId() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        WechatSyncService service = syncService(client, null, null);
+
+        // 没有可校验的草稿：直接回 false，不调用任何微信接口
+        assertThat(service.existingDraftExists(new WechatSetting(), null).block()).isFalse();
+        assertThat(service.existingDraftExists(new WechatSetting(), "  ").block()).isFalse();
+        verify(client, never()).getAccessToken(anyString(), anyString(), anyString());
+        verify(client, never()).draftExists(anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void existingDraftExistsQueriesWechatWithConfiguredAccount() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        ReactiveExtensionClient extensionClient = mock(ReactiveExtensionClient.class);
+        when(extensionClient.fetch(eq(Secret.class), eq("wechat-app-secret")))
+            .thenReturn(Mono.just(secret("s3cret")));
+        when(client.getAccessToken(API_BASE, APP_ID, "s3cret")).thenReturn(Mono.just("TOKEN"));
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(true));
+
         WechatSetting setting = new WechatSetting();
         setting.setAppId(APP_ID);
+        setting.setAppSecretName("wechat-app-secret");
+        WechatSyncService service = syncService(client, extensionClient, null);
+
+        // 草稿仍在微信侧：true（MCP 提交时才据此说「本次会更新草稿」）
+        assertThat(service.existingDraftExists(setting, "DRAFT-1").block()).isTrue();
+
+        // 草稿已被删除：如实回 false，调用方按「新建」处理
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(false));
+        assertThat(service.existingDraftExists(setting, "DRAFT-1").block()).isFalse();
+    }
+
+    @Test
+    void existingDraftExistsReturnsFalseWhenCheckFails() {
+        WechatMpClient client = mock(WechatMpClient.class);
+        // 取 access_token 失败（AppSecret 配置有误等）：按「已不在」处理，不向调用方抛出异常
+        when(client.getAccessToken(anyString(), anyString(), anyString()))
+            .thenReturn(Mono.error(new WechatApiException("获取 access_token 失败")));
+        ReactiveExtensionClient extensionClient = mock(ReactiveExtensionClient.class);
+        when(extensionClient.fetch(eq(Secret.class), eq("wechat-app-secret")))
+            .thenReturn(Mono.just(secret("s3cret")));
+
+        WechatSetting setting = new WechatSetting();
+        setting.setAppId(APP_ID);
+        setting.setAppSecretName("wechat-app-secret");
+
+        assertThat(syncService(client, extensionClient, null).existingDraftExists(setting, "DRAFT-1").block())
+            .isFalse();
+    }
+
+    /** 含约定键的 AppSecret Secret。 */
+    private static Secret secret(String appSecret) {
+        Secret secret = new Secret();
+        secret.setStringData(Map.of(WechatSetting.APP_SECRET_KEY, appSecret));
+        return secret;
+    }
+
+    /** 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存）：{@code draftMediaId} 为空表示首次同步。 */
+    private String createDraft(WechatMpClient client) {
+        return createDraft(client, null);
+    }
+
+    /** 默认开启「重复同步更新草稿」：非空 draftMediaId 时先校验、在则更新。 */
+    private String createDraft(WechatMpClient client, String draftMediaId) {
+        return createDraft(client, draftMediaId, true);
+    }
+
+    /**
+     * 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存）。
+     *
+     * @param draftMediaId         上次成功同步写入的草稿 media_id；为空表示首次同步（直接新建草稿）
+     * @param updateExistingDraft  插件设置「重复同步更新草稿」开关：关闭时每次同步都新建草稿
+     */
+    private String createDraft(WechatMpClient client, String draftMediaId, boolean updateExistingDraft) {
+        WechatSetting setting = new WechatSetting();
+        setting.setAppId(APP_ID);
+        setting.setUpdateExistingDraft(updateExistingDraft);
         SyncRequest request = new SyncRequest();
         request.setTitle("测试文章");
         request.setCover(COVER_URL);
         request.setContent("<p>正文</p>");
         return syncService(client, null, null)
             .createDraft(API_BASE, setting, "TOKEN", request, new BeautifySetting(),
-                BASE_URL + "/archives/hello-world", BASE_URL)
+                BASE_URL + "/archives/hello-world", BASE_URL, draftMediaId)
             .block();
     }
 
@@ -734,7 +922,8 @@ class WechatSyncServiceTest {
 
     @Test
     void previewKeepsImageAttachmentLinkForSubmitTimeTransfer() throws Exception {
-        // 图片型附件能不能转存要下载后按真实字节判定，与正文图片一样只在提交时处理，预览中保持原链接
+        // 图片型附件能不能转存要下载后按真实字节判定，与正文图片一样只在提交时处理，
+        // 预览中保留该链接（仅把相对地址补全为完整链接，见 previewUsesCompleteUrlsForImagesAndLinks）
         WechatSyncService previewService = previewServiceWithExternalUrl("https://blog.example.com/");
         SyncRequest request = new SyncRequest();
         request.setContent("<p><a href=\"/upload/2026/09/pic.png\">图片附件</a></p>");
@@ -743,7 +932,51 @@ class WechatSyncServiceTest {
             previewService.preview(request, new WechatSetting(), new BeautifySetting()).block();
 
         assertThat(result).isNotNull();
-        assertThat((String) result.get("content")).contains("<a href=\"/upload/2026/09/pic.png\"");
+        assertThat((String) result.get("content"))
+            .contains("<a href=\"https://blog.example.com/upload/2026/09/pic.png\"");
+    }
+
+    @Test
+    void previewUsesCompleteUrlsForImagesAndLinks() throws Exception {
+        // 预览正文里的相对地址补全为完整链接：Console 预览有站点页面可解析相对地址，
+        // 而 MCP 客户端拿到的是脱离站点的 HTML 片段，相对地址会让图片打不开
+        WechatSyncService previewService = previewServiceWithExternalUrl("https://blog.example.com/");
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p><img src=\"/upload/2026/09/pic.png\" alt=\"图\">"
+            + "<a href=\"/archives/hello\">站内文章</a>"
+            + "<a href=\"https://github.com/hcjike/plugin-wechat-official-sync\">仓库</a>"
+            + "<a href=\"#top\">回到顶部</a>"
+            + "<img src=\"data:image/gif;base64,R0lGOD\"></p>");
+
+        Map<String, Object> result =
+            previewService.preview(request, new WechatSetting(), new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        assertThat((String) result.get("content"))
+            .contains("src=\"https://blog.example.com/upload/2026/09/pic.png\"")
+            .contains("href=\"https://blog.example.com/archives/hello\"")
+            // 已是绝对地址与非文件类地址（锚点、data:）原样保留
+            .contains("href=\"https://github.com/hcjike/plugin-wechat-official-sync\"")
+            .contains("href=\"#top\"")
+            .contains("src=\"data:image/gif;base64,R0lGOD\"");
+    }
+
+    @Test
+    void previewKeepsRelativeUrlsWhenExternalUrlNotConfigured() throws Exception {
+        // 未配置「外部访问地址」时没有可用基址：保持相对地址（Console 预览仍由页面自身解析）
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        when(client.fetch(eq(ConfigMap.class), eq(SystemSetting.SYSTEM_CONFIG))).thenReturn(Mono.empty());
+        // ExternalUrlSupplier 未配置时 getRaw() 返回 null，即没有可用的站点地址
+        ExternalUrlSupplier supplier = mock(ExternalUrlSupplier.class);
+        WechatSyncService previewService = syncService(null, client, supplier);
+        SyncRequest request = new SyncRequest();
+        request.setContent("<p><img src=\"/upload/2026/09/pic.png\" alt=\"图\"></p>");
+
+        Map<String, Object> result =
+            previewService.preview(request, new WechatSetting(), new BeautifySetting()).block();
+
+        assertThat(result).isNotNull();
+        assertThat((String) result.get("content")).contains("src=\"/upload/2026/09/pic.png\"");
     }
 
     /** 构造一个「外部访问地址」为给定值的预览服务（ConfigMap 未配置时回退外部地址供应器）。 */

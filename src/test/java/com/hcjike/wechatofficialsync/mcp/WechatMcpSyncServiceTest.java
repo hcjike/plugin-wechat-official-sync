@@ -80,7 +80,30 @@ class WechatMcpSyncServiceTest {
     }
 
     @Test
-    void previewCarriesPublicPreviewStylesInContent() {
+    void previewInlinesPreviewStylesIntoContent() {
+        givenPost();
+        givenSettings();
+        // 微信原生代码块：预览样式原本靠样式表，现在应内联到元素上
+        String codeBlock = "<section class=\"code-snippet__fix code-snippet__js\">"
+            + "<ul class=\"code-snippet__line-index code-snippet__js\"><li></li></ul>"
+            + "<pre class=\"code-snippet__js\"><code><span>a</span></code></pre></section>";
+        when(syncService.preview(any(), any(), any()))
+            .thenReturn(Mono.just(Map.of("title", "文章标题", "content", codeBlock)));
+
+        Map<String, Object> result = mcpSyncService.preview("post-a").block();
+
+        // 预览样式内联在元素上、行号是字面数字：MCP 客户端没有 Console 预览弹窗的宿主样式，
+        // 且可能丢掉 <style>、或由 AI 转述 HTML——内联后这些情况都不影响渲染
+        assertThat((String) result.get("content"))
+            .doesNotContain("<style")
+            .contains("display:flex")
+            .contains("<li style=\"height:1.7em;list-style:none;\">1</li>");
+        // 只改写 content：其余字段原样透传，仍与 MCP 工具声明的 outputSchema 对齐
+        assertThat(result).containsEntry("title", "文章标题");
+    }
+
+    @Test
+    void previewKeepsContentWithoutDecorableElementsUnchanged() {
         givenPost();
         givenSettings();
         when(syncService.preview(any(), any(), any()))
@@ -88,13 +111,8 @@ class WechatMcpSyncServiceTest {
 
         Map<String, Object> result = mcpSyncService.preview("post-a").block();
 
-        // content 带上公共预览样式（MCP 客户端没有 Console 预览弹窗提供的补充样式），美化结果原样保留
-        assertThat((String) result.get("content"))
-            .startsWith("<style>")
-            .contains(".code-snippet__fix")
-            .endsWith("<p>美化后正文</p>");
-        // 只改写 content：其余字段原样透传，仍与 MCP 工具声明的 outputSchema 对齐
-        assertThat(result).containsEntry("title", "文章标题");
+        // 没有代码块 / 布局表格时正文逐字保留：不再前置样式块，也不会被重新排版
+        assertThat((String) result.get("content")).isEqualTo("<p>美化后正文</p>");
     }
 
     @Test
@@ -189,11 +207,78 @@ class WechatMcpSyncServiceTest {
 
         assertThat(result).containsEntry("status", SyncRecord.STATUS_PENDING);
         assertThat(result).containsEntry("postName", "post-a");
+        // 该文章尚未成功同步过（没有已知草稿）：回传的草稿动作就是「新建」
+        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
         // 与 MCP 工具声明的 outputSchema 对齐：多出/缺少字段都会被 MCP Server 判为契约不一致
-        assertThat(result).containsOnlyKeys("postName", "title", "status", "message");
+        assertThat(result).containsOnlyKeys("postName", "title", "status", "draftAction", "message");
         // 与 Console 一致的顺序：先落库任务（含输入快照）再异步执行
         verify(taskStore).savePending(eq("post-a"), any());
         verify(taskRunner).start(eq("post-a"), any());
+    }
+
+    @Test
+    void submitReportsUpdateOnlyWhenExistingDraftStillOnWechat() {
+        givenPost();
+        givenSubmitReady();
+        when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", successRecord("DRAFT-1"))));
+        // 该文章已有草稿，且实查确认那份草稿仍在微信侧：动作才是「更新」
+        when(syncService.existingDraftExists(any(), eq("DRAFT-1"))).thenReturn(Mono.just(true));
+
+        Map<String, Object> result = mcpSyncService.submit("post-a").block();
+
+        assertThat(result).isNotNull();
+        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE);
+        assertThat((String) result.get("message")).contains("更新");
+    }
+
+    @Test
+    void submitReportsCreateWhenExistingDraftWasDeletedOnWechat() {
+        givenPost();
+        givenSubmitReady();
+        when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", successRecord("DRAFT-1"))));
+        // 任务记录里的草稿 id 还在，但那份草稿已被（在公众号后台）删除：动作必须是「新建」而不是「更新」
+        when(syncService.existingDraftExists(any(), eq("DRAFT-1"))).thenReturn(Mono.just(false));
+
+        Map<String, Object> result = mcpSyncService.submit("post-a").block();
+
+        assertThat(result).isNotNull();
+        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
+        assertThat((String) result.get("message")).contains("新建一份草稿");
+    }
+
+    @Test
+    void submitReportsCreateWhenDraftCheckFails() {
+        givenPost();
+        givenSubmitReady();
+        when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", successRecord("DRAFT-1"))));
+        // 校验拿不到结论（代理未转发 draft/get、限流等）：同样按「已不在」处理、本次按新建提交
+        when(syncService.existingDraftExists(any(), eq("DRAFT-1")))
+            .thenReturn(Mono.error(new IllegalStateException("draft/get unavailable")));
+
+        Map<String, Object> result = mcpSyncService.submit("post-a").block();
+
+        assertThat(result).isNotNull();
+        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
+    }
+
+    @Test
+    void submitReportsCreateWhenUpdateExistingDraftDisabled() {
+        givenPost();
+        WechatSetting setting = setting();
+        setting.setUpdateExistingDraft(false);
+        when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
+            .thenReturn(Mono.just(setting));
+        when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", successRecord("DRAFT-1"))));
+        when(syncService.validate(any(), any())).thenReturn(Mono.just(List.of()));
+        when(taskStore.savePending(eq("post-a"), any())).thenReturn(Mono.empty());
+
+        Map<String, Object> result = mcpSyncService.submit("post-a").block();
+
+        // 关闭开关后本次只会新建：连草稿校验都省掉（不同微信接口）
+        assertThat(result).isNotNull();
+        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
+        assertThat((String) result.get("message")).contains("新建一份草稿");
+        verify(syncService, never()).existingDraftExists(any(), anyString());
     }
 
     @Test
@@ -328,11 +413,27 @@ class WechatMcpSyncServiceTest {
             .thenReturn(Mono.just(new BeautifySetting()));
     }
 
+    /** 提交场景的公共桩：已配置公众号信息、预检通过、任务落库成功（草稿校验由各用例自行决定）。 */
+    private void givenSubmitReady() {
+        when(settingFetcher.fetch(eq(WechatSetting.GROUP), eq(WechatSetting.class)))
+            .thenReturn(Mono.just(setting()));
+        when(syncService.validate(any(), any())).thenReturn(Mono.just(List.of()));
+        when(taskStore.savePending(eq("post-a"), any())).thenReturn(Mono.empty());
+    }
+
     private static WechatSetting setting() {
         WechatSetting setting = new WechatSetting();
         setting.setAppId("wx-app-id");
         setting.setAppSecretName("wechat-app-secret");
         return setting;
+    }
+
+    /** 该文章最近一次同步成功的记录（带着上次写入的草稿 media_id）：「本次是更新还是新建」据此判定。 */
+    private static SyncRecord successRecord(String mediaId) {
+        SyncRecord record = new SyncRecord();
+        record.setStatus(SyncRecord.STATUS_SUCCESS);
+        record.setMediaId(mediaId);
+        return record;
     }
 
     /** 文章 + 作者 + 渲染正文的公共桩数据（与 Console 前端取值的字段一一对应）。 */

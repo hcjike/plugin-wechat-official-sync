@@ -56,6 +56,24 @@ public class WechatSyncService {
     private static final Set<String> PAGE_EXTENSIONS =
         Set.of("html", "htm", "shtml", "php", "asp", "aspx", "jsp");
 
+    /**
+     * 预览里需要补全为完整地址的「标签 + 地址属性」对：图片、链接与媒体元素。
+     *
+     * <p>{@code video}/{@code audio} 在美化阶段已重建为提示卡片（不再带地址），这里一并兜底，
+     * 避免其它来源的媒体元素留下相对地址。</p>
+     */
+    private static final String[][] PREVIEW_URL_ATTRIBUTES = {
+        {"img", "src"},
+        {"a", "href"},
+        {"source", "src"},
+        {"video", "src"},
+        {"video", "poster"},
+        {"audio", "src"},
+        {"iframe", "src"},
+        {"embed", "src"},
+        {"object", "data"}
+    };
+
     private final WechatMpClient wechatMpClient;
 
     private final ReactiveExtensionClient client;
@@ -74,13 +92,32 @@ public class WechatSyncService {
     }
 
     /**
-     * 执行一次完整的同步流程，成功后返回草稿 media_id。
+     * 首次同步（没有已知草稿）：直接新建草稿，成功后返回草稿 media_id。
      *
      * @param request  同步请求（文章标题/正文/封面等）
      * @param setting  公众号凭据与基本配置
      * @param beautify 正文美化配置（独立设置分组，缺省时用内置默认值）
      */
     public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify) {
+        return submit(request, setting, beautify, null);
+    }
+
+    /**
+     * 执行一次完整的同步流程，成功后返回草稿 media_id。
+     *
+     * <p><b>重复同步</b>：{@code draftMediaId} 非空（该文章上次成功同步写入的草稿）<b>且插件设置里
+     * 开启了「重复同步更新草稿」</b>（{@link WechatSetting#isUpdateExistingDraft()}，默认开启）时，
+     * 先校验这份草稿是否仍在——在则<b>更新草稿</b>（{@code draft/update}），不在则<b>新建草稿</b>
+     * （{@code draft/add}）；校验过程发生任何错误都按「草稿不存在」处理、直接新建，不会因为一次校验
+     * 失败打断同步。首次同步（{@code draftMediaId} 为空）与开关关闭时都直接新建。</p>
+     *
+     * @param request       同步请求（文章标题/正文/封面等）
+     * @param setting       公众号凭据与基本配置
+     * @param beautify      正文美化配置（独立设置分组，缺省时用内置默认值）
+     * @param draftMediaId  上次成功同步写入的草稿 media_id；为空表示首次同步（直接新建草稿）
+     */
+    public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify,
+        String draftMediaId) {
         // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
         String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
         // 先在 boundedElastic 上解析图片下载内网白名单并下发给下载客户端：SsrfPolicy.parse 可能
@@ -98,7 +135,7 @@ public class WechatSyncService {
                             .flatMap(appSecret -> wechatMpClient
                                 .getAccessToken(apiBase, setting.getAppId(), appSecret)
                                 .flatMap(token -> createDraft(apiBase, setting, token, request, beautify,
-                                    sourceUrl, baseUrl)));
+                                    sourceUrl, baseUrl, draftMediaId)));
                     }))));
     }
 
@@ -113,6 +150,10 @@ public class WechatSyncService {
      * （草稿「阅读原文」链接，为空表示不会生成）与 {@code commentMode}（留言设置）即提交后实际写入
      * 草稿的值；{@code truncatedFields} 列出其中**因超过微信长度上限被截断**的字段名
      * （{@code title} / {@code author} / {@code digest}），供 Console 在预览中给出明确标识。</p>
+     *
+     * <p>{@code content} 里的图片、链接等相对地址会按站点「外部访问地址」补全为**完整链接**（见
+     * {@link #absolutizeUrls}）：Console 预览渲染在站点页面内可解析相对地址，而 MCP 客户端拿到的
+     * 是脱离站点的 HTML 片段，补全后两个入口的预览都能正常显示图片。</p>
      */
     public Mono<Map<String, Object>> preview(SyncRequest request, WechatSetting setting,
         BeautifySetting beautify) {
@@ -124,6 +165,9 @@ public class WechatSyncService {
                     // 附件链接处理在预览里也要跑一遍（只做无需下载即可判定的降级），
                     // 否则「附件链接显示」开关在预览中看不出任何效果
                     .flatMap(html -> showUnsubmittableLinksAsPlainText(html, baseUrl, beautify))
+                    // 相对地址补全为完整链接：Console 预览有站点页面可解析相对地址，
+                    // 而 MCP 客户端拿到的是脱离站点的 HTML 片段，相对地址会让图片打不开
+                    .map(html -> absolutizeUrls(html, baseUrl))
                     .map(html -> {
                         Map<String, Object> result = new HashMap<>();
                         result.put("content", html == null ? "" : html);
@@ -185,6 +229,35 @@ public class WechatSyncService {
                     errors.add(issue);
                 }
                 return collectCoverIssues(request, errors);
+            });
+    }
+
+    /**
+     * 校验「上次成功同步写入的那份草稿」是否仍在微信侧（只读：{@code draft/get}）。
+     *
+     * <p>供 MCP 的 {@code wechat_sync_submit} 在提交时<b>判定本次动作</b>（更新已有草稿 / 新建草稿）：
+     * 草稿记录里的 {@code media_id} 只能说明「上次同步时写过一份」，那份草稿此后可能已在公众号后台
+     * 被删除，所以必须实查一次才能如实回传 update / create。</p>
+     *
+     * <p>只有微信明确取回草稿详情才返回 {@code true}；{@code mediaId} 为空、草稿已被删除、
+     * 拿不到 {@code access_token}（未配置 AppSecret 等）、代理未转发该接口、限流、网络异常
+     * 一律返回 {@code false}——与执行阶段的兜底规则一致（按「不在」处理），因此本方法
+     * <b>不会</b>以异常中断调用方，也不会写任何数据。</p>
+     */
+    public Mono<Boolean> existingDraftExists(WechatSetting setting, String draftMediaId) {
+        if (isBlank(draftMediaId)) {
+            // 没有可校验的草稿：谈不上「还在」，调用方按新建处理
+            return Mono.just(false);
+        }
+        WechatSetting cfg = setting == null ? new WechatSetting() : setting;
+        String apiBase = WechatMpClient.resolveApiBase(cfg.getBaseUrl());
+        return resolveAppSecret(cfg)
+            .flatMap(appSecret -> wechatMpClient.getAccessToken(apiBase, cfg.getAppId(), appSecret))
+            .flatMap(token -> wechatMpClient.draftExists(apiBase, token, draftMediaId))
+            .onErrorResume(error -> {
+                log.info("校验草稿 [{}] 是否仍在微信侧失败，按「已不在」处理：{}", draftMediaId,
+                    SensitiveText.mask(error.getMessage()));
+                return Mono.just(false);
             });
     }
 
@@ -515,27 +588,88 @@ public class WechatSyncService {
     }
 
     /**
-     * 上传封面并创建草稿：先传封面拿到 {@code thumb_media_id}，再处理正文、提交 {@code draft/add}。
+     * 上传封面并保存草稿：先传封面拿到 {@code thumb_media_id}，再处理正文，最后按
+     * {@code draftMediaId} 决定「更新既有草稿」还是「新建草稿」（见 {@link #saveDraft}）。
      *
      * <p><b>自愈重试</b>：封面素材虽经缓存校验，仍可能已在微信侧失效——素材被删除后它的图片地址往往依旧
      * 可访问，把地址当判据会漏判；「接口地址」代理没转发 {@code material/get_material} 时也拿不到结论而只能
-     * 保守复用。这类情况下 {@code draft/add} 会以 {@code 40007 invalid media_id} 拒绝，此时重传一次封面再建
-     * 一次草稿（见 {@link #retryWithFreshCover}），用户不必自己排查，也不会被同一个失效 id 反复拒绝。</p>
+     * 保守复用。这类情况下草稿接口会以 {@code 40007 invalid media_id} 拒绝，此时重传一次封面再提交
+     * （见 {@link #retryWithFreshCover}），用户不必自己排查，也不会被同一个失效 id 反复拒绝。</p>
      *
      * <p>包内可见是为了让测试直接覆盖「封面 → 草稿」这段链路（不必绕开整个提交入口）。</p>
      */
     Mono<String> createDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
-        BeautifySetting beautify, String sourceUrl, String baseUrl) {
+        BeautifySetting beautify, String sourceUrl, String baseUrl, String draftMediaId) {
         return uploadCover(apiBase, setting.getAppId(), token, request.getCover(), baseUrl, false)
             .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材已就绪，thumb_media_id={}",
                 request.getTitle(), thumbMediaId))
             .flatMap(thumbMediaId -> prepareContent(apiBase, setting.getAppId(), token, request, beautify,
                     baseUrl)
-                .flatMap(content -> addDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId,
-                        content)
-                    .onErrorResume(WechatSyncService::isInvalidMediaId,
-                        e -> retryWithFreshCover(apiBase, setting, token, request, baseUrl, sourceUrl,
-                            content, e))));
+                .flatMap(content -> saveDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                    content, baseUrl, draftMediaId)));
+    }
+
+    /**
+     * 保存草稿：首次同步（没有已知草稿）直接新建；重复同步且开启「重复同步更新草稿」时，
+     * 先校验既有草稿是否仍在——在则更新，不在则新建。
+     *
+     * <p><b>开关关闭时每次都新建</b>：插件设置「微信公众号 → 重复同步更新草稿」关闭后不做任何校验，
+     * 每次同步都新增一份草稿（与旧版本行为一致）。</p>
+     *
+     * <p><b>校验草稿时出错也走新建</b>：{@code draft/get} 拿不到确定结论（代理未转发该接口、限流、
+     * 网络异常等）时按「草稿不存在」处理，直接新建一份草稿，不因为一次校验失败让整次同步失败。</p>
+     *
+     * <p><b>更新被 {@code 40007} 拒绝同样回退到新建</b>：该错误码既可能来自草稿本身已被删除，也可能来自
+     * 草稿引用的封面素材已失效，因此统一改走「新建草稿」路径——封面素材若已失效，新建路径还会再触发
+     * 一次封面重传（见 {@link #retryWithFreshCover}）。其余错误照原样抛出，不做无谓重试。</p>
+     */
+    private Mono<String> saveDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
+        String sourceUrl, String thumbMediaId, String content, String baseUrl, String draftMediaId) {
+        if (isBlank(draftMediaId)) {
+            log.info("文章《{}》首次同步（没有已知草稿），直接新建草稿", request.getTitle());
+            return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                content, baseUrl);
+        }
+        if (!setting.isUpdateExistingDraft()) {
+            log.info("文章《{}》已关闭「重复同步更新草稿」，本次仍新建草稿（上次同步的草稿 {} 保持不变）",
+                request.getTitle(), draftMediaId);
+            return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                content, baseUrl);
+        }
+        return wechatMpClient.draftExists(apiBase, token, draftMediaId)
+            // 校验草稿出错（代理未转发 draft/get、限流、网络异常等）同样按「不存在」处理：
+            // 客户端已把可预期的失败收敛为 false，这里再兜一层异常信号，确保校验绝不打断同步
+            .onErrorResume(error -> {
+                log.warn("文章《{}》校验既有草稿 [{}] 失败（{}）：改为新建草稿", request.getTitle(),
+                    draftMediaId, error.getMessage());
+                return Mono.just(false);
+            })
+            .flatMap(exists -> {
+                if (!exists) {
+                    log.info("文章《{}》上次同步的草稿 [{}] 已不存在，改为新建草稿", request.getTitle(),
+                        draftMediaId);
+                    return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl, thumbMediaId,
+                        content, baseUrl);
+                }
+                return updateDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId, content,
+                        draftMediaId)
+                    .onErrorResume(WechatSyncService::isInvalidMediaId, error -> {
+                        log.warn("文章《{}》更新草稿 [{}] 被拒（{}）：改为新建草稿", request.getTitle(),
+                            draftMediaId, error.getMessage());
+                        return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl,
+                            thumbMediaId, content, baseUrl);
+                    });
+            });
+    }
+
+    /**
+     * 新建草稿，并在被 {@code 40007} 拒绝（封面素材已失效）时重传一次封面再建一次。
+     */
+    private Mono<String> addDraftWithCoverRetry(String apiBase, WechatSetting setting, String token,
+        SyncRequest request, String sourceUrl, String thumbMediaId, String content, String baseUrl) {
+        return addDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId, content)
+            .onErrorResume(WechatSyncService::isInvalidMediaId,
+                e -> retryWithFreshCover(apiBase, setting, token, request, baseUrl, sourceUrl, content, e));
     }
 
     /** 提交草稿：把已就绪的封面与正文组装成文章（失败时的错误带微信错误码，见 {@link WechatApiException}）。 */
@@ -543,6 +677,14 @@ public class WechatSyncService {
         String sourceUrl, String thumbMediaId, String content) {
         return wechatMpClient.addDraft(apiBase, token,
             buildArticle(request, setting, thumbMediaId, content, sourceUrl));
+    }
+
+    /** 更新既有草稿（{@code draft/update}）：成功时返回的仍是原来那个草稿 media_id。 */
+    private Mono<String> updateDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
+        String sourceUrl, String thumbMediaId, String content, String draftMediaId) {
+        return wechatMpClient.updateDraft(apiBase, token, draftMediaId,
+                buildArticle(request, setting, thumbMediaId, content, sourceUrl))
+            .doOnNext(mediaId -> log.info("文章《{}》已更新既有草稿，media_id={}", request.getTitle(), mediaId));
     }
 
     /**
@@ -763,6 +905,56 @@ public class WechatSyncService {
             }
         }
         return Mono.just(document.body().html());
+    }
+
+    /**
+     * 预览用：把正文里的相对地址补全为完整链接（站点「外部访问地址」+ 相对路径）。
+     *
+     * <p>Console 预览弹窗把正文渲染在站点页面内，{@code /upload/...} 这类相对地址由浏览器按当前站点
+     * 自动补全；而 MCP 客户端（AI 对话界面等）拿到的是脱离站点的 HTML 片段，没有可解析的基准，图片
+     * 会打不开。故预览统一补全为完整链接，两个入口的预览内容一致。</p>
+     *
+     * <p>只改预览返回的 HTML，**不影响提交到微信的草稿**：提交时用前端上送的原始正文（相对地址由服务端
+     * 在下载 / 转存时自行补全），正文图片也在提交时才转存为微信图片地址。</p>
+     *
+     * <p>只处理 {@link #PREVIEW_URL_ATTRIBUTES} 里的地址属性；已是绝对地址、非文件类地址
+     * （{@code #} 锚点、{@code mailto:}、{@code data:} 等）原样保留；未配置「外部访问地址」
+     * （{@code baseUrl} 为空）时没有可用基址，整段原样返回。</p>
+     */
+    String absolutizeUrls(String html, String baseUrl) {
+        if (isBlank(html) || isBlank(baseUrl)) {
+            return html == null ? "" : html;
+        }
+        Document document = Jsoup.parseBodyFragment(html);
+        document.outputSettings().prettyPrint(false);
+        for (String[] attribute : PREVIEW_URL_ATTRIBUTES) {
+            String selector = attribute[0] + "[" + attribute[1] + "]";
+            for (Element element : document.select(selector)) {
+                String resolved = absolutizeUrl(element.attr(attribute[1]), baseUrl);
+                if (resolved != null) {
+                    element.attr(attribute[1], resolved);
+                }
+            }
+        }
+        return document.body().html();
+    }
+
+    /**
+     * 单个地址的补全：相对地址补成「基址 + 路径」，其余情况返回 {@code null} 表示不需要改写
+     * （已是绝对地址 / 协议相对地址、非文件类地址、空值，或没有可用基址）。
+     */
+    private String absolutizeUrl(String url, String baseUrl) {
+        String trimmed = url == null ? "" : url.trim();
+        if (trimmed.isEmpty() || isNonFileHref(trimmed) || isAbsoluteUrl(trimmed)) {
+            return null;
+        }
+        return resolveUrl(trimmed, baseUrl);
+    }
+
+    /** 是否已是绝对地址（{@code http://} / {@code https://}，或协议相对的 {@code //host/...}）。 */
+    private static boolean isAbsoluteUrl(String url) {
+        String lower = url.toLowerCase(Locale.ROOT);
+        return lower.startsWith("http://") || lower.startsWith("https://") || url.startsWith("//");
     }
 
     /**
