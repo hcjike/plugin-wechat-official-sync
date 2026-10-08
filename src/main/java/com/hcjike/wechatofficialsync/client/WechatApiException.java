@@ -16,8 +16,10 @@ public class WechatApiException extends RuntimeException {
     /**
      * 微信「不合法的媒体文件 id」错误码。
      *
-     * <p>两个场景会用到它：{@code material/get_material} 返回它说明素材确实已被删除（校验缓存时据此判失效）；
-     * {@code draft/add} 返回它说明草稿引用的 {@code thumb_media_id} 已失效（据此触发封面的重传重试）。</p>
+     * <p>三个场景会用到它：{@code material/get_material} 返回它说明素材确实已被删除（校验缓存时据此判失效）；
+     * {@code draft/add} / {@code draft/update} 返回它说明草稿引用的 {@code thumb_media_id} 已失效，
+     * 或（{@code draft/update} 时）该草稿本身已不存在——前者触发封面重传重试，后者触发改为新建草稿
+     * （见 {@code WechatSyncService}）。</p>
      */
     public static final String INVALID_MEDIA_ID_ERRCODE = "40007";
 

@@ -79,5 +79,18 @@ public class WechatSetting {
      * 不会被清理任务误删；因此清理掉的都是确实已经不再使用的缓存。</p>
      */
     private String cacheRetentionDays;
+
+    /**
+     * 重复同步时是否更新上次写入的草稿（表单为开关，<b>默认开启</b>）。
+     *
+     * <p><b>开启</b>：同一篇文章再次同步时，先校验上次写入的那份草稿是否还在——在则更新它
+     * （{@code draft/update}，草稿 media_id 不变），不在（或校验给不出结论）则新建
+     * （{@code draft/add}），避免草稿箱里堆出一堆重复草稿。</p>
+     *
+     * <p><b>关闭</b>：不做任何校验，每次同步都新建一份草稿（与旧版本行为一致）。</p>
+     *
+     * <p>判定逻辑见 {@code WechatSyncService#saveDraft}。</p>
+     */
+    private boolean updateExistingDraft = true;
 }
 

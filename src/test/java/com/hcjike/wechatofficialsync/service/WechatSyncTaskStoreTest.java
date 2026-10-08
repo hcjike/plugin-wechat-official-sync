@@ -134,26 +134,66 @@ class WechatSyncTaskStoreTest {
     void startAttemptIncrementsAttemptsAndAppliesMessage() {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         WechatSyncTask existing = task("post-a", SyncRecord.STATUS_PENDING, 1);
+        // 上次成功同步写入的草稿：执行时据此决定「更新既有草稿」还是「新建草稿」
+        existing.getSpec().setMediaId("DRAFT-1");
         when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
             .thenReturn(Mono.just(existing));
         when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
 
-        Integer attempts = new WechatSyncTaskStore(client)
+        WechatSyncTaskStore.Attempt attempt = new WechatSyncTaskStore(client)
             .startAttempt("post-a", "同步任务因插件重启中断，正在自动恢复…").block();
 
-        assertThat(attempts).isEqualTo(2);
+        assertThat(attempt).isNotNull();
+        assertThat(attempt.attempts()).isEqualTo(2);
+        assertThat(attempt.draftMediaId()).isEqualTo("DRAFT-1");
         assertThat(existing.getSpec().getAttempts()).isEqualTo(2);
         assertThat(existing.getSpec().getMessage()).contains("自动恢复");
     }
 
     @Test
-    void startAttemptReturnsZeroWhenTaskMissing() {
+    void startAttemptReturnsMissingWhenTaskMissing() {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         when(client.fetch(eq(WechatSyncTask.class), anyString())).thenReturn(Mono.empty());
 
-        Integer attempts = new WechatSyncTaskStore(client).startAttempt("post-x", null).block();
+        WechatSyncTaskStore.Attempt attempt =
+            new WechatSyncTaskStore(client).startAttempt("post-x", null).block();
 
-        assertThat(attempts).isZero();
+        assertThat(attempt).isNotNull();
+        assertThat(attempt.attempts()).isZero();
+        assertThat(attempt.draftMediaId()).isNull();
+    }
+
+    @Test
+    void savePendingKeepsPreviousDraftMediaId() {
+        // 重复提交：不能丢掉「上次同步写入的是哪份草稿」，否则每次同步都会新建一份草稿、越积越多
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_SUCCESS, 1);
+        existing.getSpec().setMediaId("DRAFT-1");
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+        when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
+
+        new WechatSyncTaskStore(client).savePending("post-a", request("文章 A")).block();
+
+        assertThat(existing.getSpec().getMediaId()).isEqualTo("DRAFT-1");
+        assertThat(existing.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_PENDING);
+    }
+
+    @Test
+    void failedCompletionKeepsPreviousDraftMediaId() {
+        // 失败记录不带 media_id：不能把上次成功同步的草稿 id 抹掉，
+        // 否则用户重试时会新建草稿而不是更新那份仍然存在的草稿
+        ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
+        WechatSyncTask existing = task("post-a", SyncRecord.STATUS_PENDING, 1);
+        existing.getSpec().setMediaId("DRAFT-1");
+        when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
+            .thenReturn(Mono.just(existing));
+        when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
+
+        new WechatSyncTaskStore(client).complete("post-a", SyncRecord.failed("限流")).block();
+
+        assertThat(existing.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
+        assertThat(existing.getSpec().getMediaId()).isEqualTo("DRAFT-1");
     }
 
     @Test

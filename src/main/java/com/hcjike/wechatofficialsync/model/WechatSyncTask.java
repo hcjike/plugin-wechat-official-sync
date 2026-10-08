@@ -63,7 +63,14 @@ public class WechatSyncTask extends AbstractExtension {
         /** 最近一次状态更新时间（ISO-8601）。 */
         private String time;
 
-        /** 成功时的公众号草稿 media_id。 */
+        /**
+         * 成功时的公众号草稿 media_id。
+         *
+         * <p>成功同步后保留、失败时也不清空（见 {@code WechatSyncTaskStore#complete}）：它记录的是
+         * 「这篇文章当前对应哪份草稿」，重复同步时据此判断「更新既有草稿」还是「新建草稿」
+         * （是否启用更新由插件设置「微信公众号 → 重复同步更新草稿」控制），避免每同步一次就在
+         * 公众号草稿箱里多出一份草稿。</p>
+         */
         private String mediaId;
 
         /**

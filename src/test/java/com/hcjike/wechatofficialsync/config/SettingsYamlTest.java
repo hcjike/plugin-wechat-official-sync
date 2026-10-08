@@ -42,6 +42,20 @@ class SettingsYamlTest {
         assertThat(field).doesNotContainKey("options");
     }
 
+    @Test
+    void updateExistingDraftIsSwitchFieldEnabledByDefault() throws Exception {
+        Map<String, Object> field = formField(formOf(loadSettings(), WechatSetting.GROUP),
+            "updateExistingDraft");
+
+        // 开关，默认开启：开启后重复同步更新既有草稿，关闭则每次同步都新建草稿
+        assertThat(field).containsEntry("$formkit", "switch");
+        assertThat(field).containsEntry("value", true);
+        assertThat(field).containsEntry("onValue", true);
+        assertThat(field).containsEntry("offValue", false);
+        // 升级前保存过配置（字段缺失）时也按开启处理：与表单默认值保持一致
+        assertThat(new WechatSetting().isUpdateExistingDraft()).isTrue();
+    }
+
     @SuppressWarnings("unchecked")
     private static Map<String, Object> loadSettings() throws Exception {
         try (InputStream in = SettingsYamlTest.class.getResourceAsStream(SETTINGS_RESOURCE)) {

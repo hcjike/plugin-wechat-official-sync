@@ -74,7 +74,32 @@ class WechatMcpToolProviderTest {
     @Test
     void declaresOutputSchemaMatchingSubmitResultFields() {
         assertThat(requiredKeys(WechatMcpToolProvider.TOOL_SUBMIT))
-            .containsExactlyInAnyOrder("postName", "title", "status", "message");
+            .containsExactlyInAnyOrder("postName", "title", "status", "draftAction", "message");
+    }
+
+    @Test
+    void describesWhetherSubmitUpdatesOrCreatesTheDraft() {
+        when(mcpSyncService.submit("post-a")).thenReturn(Mono.just(Map.of(
+            "postName", "post-a",
+            "title", "文章标题",
+            "status", "PENDING",
+            "draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE,
+            "message", "已提交")));
+
+        McpToolResult result = execute(WechatMcpToolProvider.TOOL_SUBMIT, "post-a");
+
+        // 返回的是「本次提交将要执行的动作」本身，说明里写明 update / create 的含义
+        assertThat(result.structuredContent())
+            .containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE);
+        assertThat(submitFieldDescription("draftAction"))
+            .contains("update")
+            .contains("create")
+            .contains("更新")
+            .contains("新建");
+        // 关键：动作同时写进结果说明——只把动作放在结构化字段里时，只读文本的客户端会让模型自行猜测
+        assertThat(result.textContent())
+            .contains("draftAction=update")
+            .contains("更新草稿");
     }
 
     @Test
@@ -122,6 +147,9 @@ class WechatMcpToolProviderTest {
         for (String key : requiredKeys(WechatMcpToolProvider.TOOL_STATUS)) {
             assertThat(result.structuredContent().containsKey(key)).isTrue();
         }
+        // 状态与说明同样写进结果说明，只读文本的客户端也能如实回答
+        assertThat(result.textContent()).contains("《post-a》").contains("NONE")
+            .contains("该文章尚未同步过");
         verify(mcpSyncService).status("post-a");
     }
 
@@ -165,9 +193,18 @@ class WechatMcpToolProviderTest {
 
     @Test
     void describesWechatLengthRuleForTruncatedFields() {
-        // 截断后的值与文章原文长度不一致，字段说明必须带上微信的计字口径与上限，客户端才能解释「为什么变短」
-        for (String field : List.of("title", "digest", "author", "truncatedFields")) {
+        // 完整规则写在工具描述里（客户端拿到工具列表即可见）
+        for (String toolName : List.of(WechatMcpToolProvider.TOOL_PREVIEW,
+            WechatMcpToolProvider.TOOL_SUBMIT)) {
+            assertThat(toolByName(toolName).description())
+                .contains("汉字 / 全角字符计 1 字")
+                .contains("0.5 字")
+                .contains("emoji");
+        }
+        // 字段说明自带上限 + 简短的计字口径：单看字段说明即可解释「为什么变短」，不指向别处
+        for (String field : List.of("title", "digest", "author")) {
             assertThat(previewFieldDescription(field))
+                .doesNotContain("见工具说明")
                 .contains("汉字 / 全角字符计 1 字")
                 .contains("0.5 字")
                 .contains("emoji");
@@ -180,12 +217,22 @@ class WechatMcpToolProviderTest {
             .contains("title（上限 64 字）")
             .contains("author（8 字）")
             .contains("digest（120 字）");
-        // 客户端可能只看工具描述（不解析 outputSchema）：两个会改动草稿字段的工具都要写明该规则
-        assertThat(toolByName(WechatMcpToolProvider.TOOL_PREVIEW).description())
-            .contains("汉字 / 全角字符计 1 字");
+        // 提交工具指向预览工具查看截断后的值
         assertThat(toolByName(WechatMcpToolProvider.TOOL_SUBMIT).description())
-            .contains("汉字 / 全角字符计 1 字")
             .contains("wechat_sync_preview");
+    }
+
+    @Test
+    void describesPreviewContentAsSelfContainedHtmlToForwardAsIs() {
+        // 预览正文的样式内联在元素上（不依赖 <style> 标签）：工具描述与字段说明都要写明「原样输出、
+        // 不得改写」，否则客户端（AI 助手）转述时会丢掉样式、让预览效果偏离 Console 后台预览
+        for (String description : List.of(previewFieldDescription("content"),
+            toolByName(WechatMcpToolProvider.TOOL_PREVIEW).description())) {
+            assertThat(description)
+                .contains("样式已内联在元素上")
+                .contains("原样输出")
+                .contains("不要改写");
+        }
     }
 
     @Test
@@ -197,7 +244,8 @@ class WechatMcpToolProviderTest {
 
         assertThat(result.error()).isFalse();
         assertThat(result.structuredContent()).containsEntry("title", "文章标题");
-        assertThat(result.textContent()).contains("文章标题");
+        // 结果说明（模型调用时读到的文本）里同样带着「原样输出」的要求
+        assertThat(result.textContent()).contains("文章标题").contains("原样输出");
     }
 
     @Test
@@ -205,12 +253,16 @@ class WechatMcpToolProviderTest {
         when(mcpSyncService.submit("post-a")).thenReturn(Mono.just(Map.of(
             "postName", "post-a",
             "title", "文章标题",
-            "status", "PENDING")));
+            "status", "PENDING",
+            "draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE,
+            "message", "已提交")));
 
         McpToolResult result = execute(WechatMcpToolProvider.TOOL_SUBMIT, "post-a");
 
         assertThat(result.error()).isFalse();
         assertThat(result.structuredContent()).containsEntry("status", "PENDING");
+        // 新建动作同样写进结果说明（模型无需从结构化字段里推断）
+        assertThat(result.textContent()).contains("draftAction=create").contains("新建草稿");
         verify(mcpSyncService).submit("post-a");
     }
 
@@ -330,11 +382,20 @@ class WechatMcpToolProviderTest {
     }
 
     /** 读取预览工具 outputSchema 中某字段的描述文案（面向 MCP 客户端的契约说明）。 */
-    @SuppressWarnings("unchecked")
     private String previewFieldDescription(String field) {
+        return fieldDescription(WechatMcpToolProvider.TOOL_PREVIEW, field);
+    }
+
+    /** 读取提交工具 outputSchema 中某字段的描述文案。 */
+    private String submitFieldDescription(String field) {
+        return fieldDescription(WechatMcpToolProvider.TOOL_SUBMIT, field);
+    }
+
+    /** 读取指定工具 outputSchema 中某字段的描述文案。 */
+    @SuppressWarnings("unchecked")
+    private String fieldDescription(String toolName, String field) {
         Map<String, Object> properties =
-            (Map<String, Object>) toolByName(WechatMcpToolProvider.TOOL_PREVIEW).outputSchema()
-                .get("properties");
+            (Map<String, Object>) toolByName(toolName).outputSchema().get("properties");
         Map<String, Object> property = (Map<String, Object>) properties.get(field);
         assertThat(property).as("outputSchema 未声明字段：%s", field).isNotNull();
         return String.valueOf(property.get("description"));

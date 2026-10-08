@@ -1,123 +1,149 @@
 package com.hcjike.wechatofficialsync.content;
 
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+
 /**
- * 预览内容的公共样式：把「渲染美化后的正文所需的补充样式」随正文一起下发。
+ * 预览内容的补充样式：把「渲染预览所需的样式」<b>内联到元素上</b>，使预览 HTML 自带全部样式、
+ * 不依赖任何外部样式表（也不带 {@code <style>} 块）。
  *
- * <p>美化后的正文只带行内 {@code style}（微信会剥离 {@code class} 与外部 CSS），但其中有两处观感依赖
- * 样式表才能成立，缺了就会「散架」：</p>
+ * <p>美化后的正文只带行内 {@code style}（微信会剥离 {@code class} 与外部 CSS），但其中有两处观感
+ * 依赖样式表才能成立，缺了就会「散架」：</p>
  *
  * <ul>
- *   <li><b>微信原生代码块</b>（{@code code-snippet} 结构，见
- *       {@link WechatContentBeautifier}）：左侧行号列靠 CSS 计数器生成行号、右侧代码区每行一个块级
- *       {@code <code>}，没有这份样式时行号列与代码行会挤成一行；</li>
+ *   <li><b>微信原生代码块</b>（{@code code-snippet} 结构，见 {@link WechatContentBeautifier}）：
+ *       行号列靠 CSS 计数器生成行号、右侧代码区每行一个块级 {@code <code>}，没有样式时行号列与代码行
+ *       会挤成一行；</li>
  *   <li><b>分栏卡片 / 画廊</b>重建出的布局表格（{@code .wechat-layout-table}）：预览里补浅灰细边框，
  *       便于确认并排结构已生效、相邻卡片不会连成一片。</li>
  * </ul>
  *
  * <p>Console 预览弹窗把这些样式渲染进正文的 Shadow DOM（见 {@code ui/src/components/SyncPreviewDialog.vue}
- * 的 {@code PREVIEW_CONTENT_CSS}），而 MCP 客户端（AI 对话界面等）没有微信图文加载的全局样式、也不一定
- * 有预览的宿主页面样式，故由 {@link #withPreviewStyles(String)} 把同一份样式内嵌在 {@code content}
- * 字段里一起返回，使其同样能正确渲染。</p>
+ * 的 {@code PREVIEW_CONTENT_CSS}），而 MCP 客户端（AI 对话界面等）拿到的是脱离站点的 HTML 片段，
+ * 并且往往经过 AI 转述或 Markdown / HTML 清洗——{@code <style>} 标签很容易被丢掉，一丢预览就散架。
+ * 因此 MCP 侧不再下发样式块，改由 {@link #withInlineStyles(String)} 把这些声明写成元素上的
+ * {@code style} 属性；代码块的<b>行号也改写为字面数字</b>（不再依赖 CSS 计数器），
+ * 于是「元素 + 自身的行内样式」就足以正确渲染。</p>
  *
  * <p>这里的样式<b>只服务于预览渲染</b>：提交到微信公众号的草稿仍是纯行内样式的正文（微信端由它自己的
- * 全局样式渲染代码块），不会带上这段样式。两处样式分别维护（前端与后端无法直接共享源码），
- * 修改时须同步更新。</p>
+ * 全局样式渲染代码块），不会带上这些预览补丁。</p>
  *
  * @author hcjike
  * @since 1.0.0
  */
 public final class WechatPreviewStyles {
 
-    /**
-     * 预览所需的补充样式：与 Console 预览弹窗的 {@code PREVIEW_CONTENT_CSS} 保持一致
-     * （见类注释的同步说明），只影响预览观感、不进入提交到微信的草稿。
-     */
-    private static final String STYLE = """
-        /* 预览页没有微信图文加载的全局样式，需补齐微信对原生代码块（code-snippet 结构）的渲染：
-           左侧行号列由 CSS 计数器生成行号、右侧代码区每行一个块级 code（长行横向滚动），
-           否则行号列与代码行会散架、所有代码行挤成一行 */
-        .code-snippet__fix {
-          display: flex;
-          margin: 0.9em 0;
-          overflow: hidden;
-          font-family: Menlo, Consolas, 'Liberation Mono', 'Courier New', monospace;
-          font-size: 13px;
-          line-height: 1.7;
-          color: #333;
-          background: #f7f7f7;
-          border: 1px solid #f0f0f0;
-          border-radius: 4px;
-        }
+    /** 代码块外层容器类名（与 {@link WechatContentBeautifier} 的 {@code code-snippet__fix} 一致）。 */
+    private static final String CODE_FIX_CLASS = "code-snippet__fix";
 
-        ul.code-snippet__line-index {
-          flex: none;
-          padding: 12px 8px;
-          margin: 0;
-          color: #b2b2b2;
-          text-align: right;
-          list-style: none;
-          counter-reset: line;
-          user-select: none;
-        }
+    /** 代码块行号列类名（与 {@link WechatContentBeautifier} 的 {@code code-snippet__line-index} 一致）。 */
+    private static final String LINE_INDEX_CLASS = "code-snippet__line-index";
 
-        ul.code-snippet__line-index li {
-          height: 1.7em;
-          list-style: none;
-        }
+    /** 布局表格标记类名（与 {@link WechatContentBeautifier} 的 {@code wechat-layout-table} 一致）。 */
+    private static final String LAYOUT_TABLE_CLASS = "wechat-layout-table";
 
-        ul.code-snippet__line-index li::before {
-          counter-increment: line;
-          content: counter(line);
-        }
+    /** 代码块外层容器（行号列 + 代码区并排）：原样式块的 {@code .code-snippet__fix} 规则。 */
+    private static final String CODE_FIX_STYLE = "display:flex;margin:0.9em 0;overflow:hidden;"
+        + "font-family:Menlo,Consolas,'Liberation Mono','Courier New',monospace;font-size:13px;"
+        + "line-height:1.7;color:#333333;background:#f7f7f7;border:1px solid #f0f0f0;border-radius:4px;";
 
-        pre.code-snippet__js {
-          flex: 1;
-          min-width: 0;
-          padding: 12px;
-          margin: 0;
-          overflow-x: auto;
-          font-family: inherit;
-          background: transparent;
-          border: none;
-        }
+    /** 代码块行号列：原样式块的 {@code ul.code-snippet__line-index} 规则。 */
+    private static final String LINE_INDEX_STYLE = "flex:none;padding:12px 8px;margin:0;color:#b2b2b2;"
+        + "text-align:right;list-style:none;user-select:none;";
 
-        pre.code-snippet__js code {
-          display: block;
-          height: 1.7em;
-          font-family: inherit;
-          white-space: pre;
-        }
+    /** 行号列的每个序号项：原样式块的 {@code ul.code-snippet__line-index li} 规则。 */
+    private static final String LINE_INDEX_ITEM_STYLE = "height:1.7em;list-style:none;";
 
-        /* 预览里为「布局表格」（分栏卡片/画廊重建）补上浅灰细边框：提交到微信的这些表格自身无边框，
-           预览中补线仅用于确认分栏/画廊已重建为表格布局、并排结构生效，不影响提交到微信的实际产物 */
-        .wechat-layout-table td {
-          border: 1px solid #e6e6e6;
-        }
+    /** 代码区：原样式块的 {@code pre.code-snippet__js} 规则。 */
+    private static final String CODE_PRE_STYLE = "flex:1;min-width:0;padding:12px;margin:0;"
+        + "overflow-x:auto;font-family:inherit;background:transparent;border:none;";
 
-        /* 上下紧邻的布局表格（相邻的两个分栏卡片/画廊）之间留出间距：微信里每个分栏卡片/画廊各是
-           一个独立表格（一个卡片 = 一个表格），紧贴显示时浅灰边框会连成一片、看起来像一个表格 */
-        .wechat-layout-table + .wechat-layout-table {
-          margin-top: 10px;
-        }
-        """;
+    /** 代码区的每个代码行：原样式块的 {@code pre.code-snippet__js code} 规则。 */
+    private static final String CODE_LINE_STYLE =
+        "display:block;height:1.7em;font-family:inherit;white-space:pre;";
+
+    /** 布局表格单元格的预览补线：原样式块的 {@code .wechat-layout-table td} 规则。 */
+    private static final String LAYOUT_CELL_STYLE = "border:1px solid #e6e6e6;";
+
+    /** 相邻布局表格之间的间距：原样式块的 {@code .wechat-layout-table + .wechat-layout-table} 规则。 */
+    private static final String LAYOUT_TABLE_GAP_STYLE = "margin-top:10px;";
 
     private WechatPreviewStyles() {
     }
 
     /**
-     * 给预览正文带上公共样式：在正文 HTML 前插入携带 {@link #STYLE} 的 {@code <style>} 元素。
+     * 给预览正文补上渲染所需的样式：把样式声明内联到相应元素上（代码块行号同时写成字面数字）。
      *
-     * <p>样式放在正文之前，客户端无论把它当作片段渲染（样式块随正文一起生效）还是放进 iframe 渲染，
-     * 都能得到与 Console 预览一致的观感；正文本身原样保留（不包裹、不改写），因此与服务端返回的
-     * 美化结果逐字一致。</p>
+     * <p>不改动其它元素，也不包裹额外容器；正文里原本的行内样式原样保留（补充声明追加在其后，
+     * 优先级更高）。空内容原样返回——没有正文时补样式没有意义。</p>
      *
      * @param content 美化后的正文 HTML，可为 {@code null}
-     * @return 带样式块的正文 HTML；正文为空时原样返回（空内容加样式没有意义）
+     * @return 自带样式（可脱离页面样式表渲染）的正文 HTML
      */
-    public static String withPreviewStyles(String content) {
+    public static String withInlineStyles(String content) {
         if (content == null || content.isBlank()) {
             return content == null ? "" : content;
         }
-        return "<style>" + STYLE + "</style>" + content;
+        Document document = Jsoup.parseBodyFragment(content);
+        document.outputSettings().prettyPrint(false);
+        decorateCodeBlocks(document);
+        decorateLayoutTables(document);
+        return document.body().html();
+    }
+
+    /**
+     * 微信原生代码块：把行号列 / 代码行的排版样式内联到元素上，并把行号写成<b>字面数字</b>——
+     * 脱离样式表时（客户端丢掉 {@code <style>}、AI 只转发片段等）依然能看出「行号 + 代码行」结构。
+     */
+    private static void decorateCodeBlocks(Document document) {
+        for (Element wrapper : document.select("section." + CODE_FIX_CLASS)) {
+            appendStyle(wrapper, CODE_FIX_STYLE);
+            for (Element lineIndex : wrapper.select("ul." + LINE_INDEX_CLASS)) {
+                appendStyle(lineIndex, LINE_INDEX_STYLE);
+                int line = 0;
+                for (Element item : lineIndex.select("li")) {
+                    line++;
+                    appendStyle(item, LINE_INDEX_ITEM_STYLE);
+                    // 行号列原本是刻意留空的 <li>（行号由 CSS 计数器渲染），这里直接写入数字
+                    item.text(String.valueOf(line));
+                }
+            }
+            for (Element pre : wrapper.select("pre")) {
+                appendStyle(pre, CODE_PRE_STYLE);
+                for (Element code : pre.select("code")) {
+                    appendStyle(code, CODE_LINE_STYLE);
+                }
+            }
+        }
+    }
+
+    /**
+     * 布局表格（分栏卡片 / 画廊重建）：给单元格补浅灰细边框（仅预览标记，不进草稿），
+     * 并给紧邻上一个布局表格的表格补一点上间距，避免两个卡片的边框连成一片。
+     */
+    private static void decorateLayoutTables(Document document) {
+        for (Element table : document.select("table." + LAYOUT_TABLE_CLASS)) {
+            for (Element cell : table.select("td")) {
+                appendStyle(cell, LAYOUT_CELL_STYLE);
+            }
+            if (table.previousElementSibling() instanceof Element previous
+                && previous.hasClass(LAYOUT_TABLE_CLASS)) {
+                appendStyle(table, LAYOUT_TABLE_GAP_STYLE);
+            }
+        }
+    }
+
+    /**
+     * 追加内联样式：保留元素原有的 {@code style} 声明，补充的声明写在后面（同名属性覆盖原值）；
+     * 原样式不以 {@code ;} 结尾时补一个，避免两条声明粘连成非法值。
+     */
+    private static void appendStyle(Element element, String style) {
+        String existing = element.attr("style").trim();
+        if (existing.isEmpty()) {
+            element.attr("style", style);
+            return;
+        }
+        element.attr("style", existing.endsWith(";") ? existing + style : existing + ";" + style);
     }
 }

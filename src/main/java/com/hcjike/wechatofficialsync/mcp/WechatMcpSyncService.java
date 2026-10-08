@@ -55,6 +55,12 @@ public class WechatMcpSyncService {
     /** 状态查询：该文章尚未同步过（正常结果，不是错误）。 */
     static final String STATUS_NONE = "NONE";
 
+    /** 提交动作：本次将**更新**该文章既有草稿（该文章上次成功同步写入过草稿，草稿 media_id 不变）。 */
+    static final String DRAFT_ACTION_UPDATE = "update";
+
+    /** 提交动作：本次将**新建**一份草稿（该文章还没成功同步过，或已关闭「重复同步更新草稿」）。 */
+    static final String DRAFT_ACTION_CREATE = "create";
+
     private final ReactiveExtensionClient client;
 
     private final PostContentService postContentService;
@@ -110,10 +116,10 @@ public class WechatMcpSyncService {
      * 生成文章的「同步预览」：美化后的正文 HTML 与上传后实际使用的草稿元信息。
      * 不调用微信接口、不写任务记录，可反复调用。
      *
-     * <p>{@code content} 在美化结果之外还内嵌了预览所需的公共样式（见
-     * {@link WechatPreviewStyles}）：MCP 客户端（AI 对话界面等）不像 Console 预览弹窗那样有宿主页面
-     * 提供的补充样式，代码块行号与分栏/画廊布局表格会渲染不出来，故由服务端一并下发；这段样式只影响
-     * 预览渲染，提交到微信的草稿仍是纯行内样式的正文。</p>
+     * <p>{@code content} 在美化结果之外还补上了预览所需的样式（见 {@link WechatPreviewStyles}）：
+     * MCP 客户端（AI 对话界面等）不像 Console 预览弹窗那样有宿主页面提供的补充样式，代码块行号与
+     * 分栏/画廊布局表格会渲染不出来，故由服务端把这些样式<b>内联到元素上</b>（不额外下发 {@code <style>}
+     * 块，避免被客户端清洗或 AI 转述时丢掉）；这些样式只影响预览渲染，提交到微信的草稿仍是纯行内样式的正文。</p>
      */
     public Mono<Map<String, Object>> preview(String postName) {
         return buildRequest(postName)
@@ -128,7 +134,7 @@ public class WechatMcpSyncService {
     }
 
     /**
-     * 给预览结果中的 {@code content} 带上公共预览样式（其余字段原样保留）。
+     * 给预览结果中的 {@code content} 补上预览所需的样式（把样式内联到元素上；其余字段原样保留）。
      *
      * <p>复制一份再改写：美化结果由 {@link WechatSyncService#preview} 产出，不在这里就地修改，
      * 避免影响调用方的既有对象。</p>
@@ -136,7 +142,7 @@ public class WechatMcpSyncService {
     private static Map<String, Object> withPreviewStyles(Map<String, Object> preview) {
         Map<String, Object> decorated = new LinkedHashMap<>(preview);
         if (decorated.get("content") instanceof String content) {
-            decorated.put("content", WechatPreviewStyles.withPreviewStyles(content));
+            decorated.put("content", WechatPreviewStyles.withInlineStyles(content));
         }
         return decorated;
     }
@@ -147,6 +153,11 @@ public class WechatMcpSyncService {
      * <p>与 Console 的 {@code POST .../sync} 行为一致：同一篇文章「同步中」时返回冲突错误；
      * 预检不通过（微信配置、封面图等）时不落库、直接报告问题；实际同步在后台线程执行，
      * 结果写入任务记录（文章列表状态列 / 公众号草稿箱可查）。</p>
+     *
+     * <p>返回值里的 {@code draftAction}（{@value #DRAFT_ACTION_UPDATE} / {@value #DRAFT_ACTION_CREATE}）
+     * 就是<b>本次提交将要执行的动作</b>——该文章已有草稿时会实查那份草稿是否仍在微信侧，因此如实反映
+     * 「更新既有草稿」还是「新建草稿」（草稿已被删除就是新建），MCP 客户端（AI 助手）无需再理解配置项，
+     * 直接据此告诉用户即可，而不是只能笼统地说「已提交同步」。</p>
      */
     public Mono<Map<String, Object>> submit(String postName) {
         return buildRequest(postName)
@@ -159,18 +170,49 @@ public class WechatMcpSyncService {
                             return Mono.error(new WechatMcpSyncException(
                                 WechatMcpSyncException.CODE_CONFLICT, "该文章正在同步中，请等待完成后再试"));
                         }
+                        // 该文章当前对应的草稿（上次成功同步写入的 media_id）：本次是更新还是新建由它决定
+                        String existingDraftMediaId = existingDraftMediaId(records, name);
                         return settingFetcher.fetch(WechatSetting.GROUP, WechatSetting.class)
                             .switchIfEmpty(Mono.error(new WechatMcpSyncException(
                                 WechatMcpSyncException.CODE_PRECONDITION_FAILED,
                                 "插件尚未配置微信公众号信息，请先在插件设置中配置 AppID / AppSecret")))
                             .flatMap(setting -> syncService.validate(request, setting)
                                 .flatMap(errors -> errors.isEmpty()
-                                    ? saveAndStart(name, request)
+                                    ? draftAction(setting, existingDraftMediaId)
+                                        .flatMap(action -> saveAndStart(name, request, action))
                                     : Mono.error(new WechatMcpSyncException(
                                         WechatMcpSyncException.CODE_PRECONDITION_FAILED,
                                         String.join("；", errors)))));
                     });
             });
+    }
+
+    /** 该文章当前对应的草稿 media_id（任务记录里保存的上次成功同步结果）；尚未同步过则为 {@code null}。 */
+    private static String existingDraftMediaId(Map<String, SyncRecord> records, String postName) {
+        SyncRecord record = records.get(postName);
+        return record == null ? null : record.getMediaId();
+    }
+
+    /**
+     * 本次提交将要执行的草稿动作。
+     *
+     * <p>该文章上次成功同步写入过草稿、且插件设置里开启了「重复同步更新草稿」时，<b>实查一次</b>那份草稿
+     * 是否仍在微信侧（见 {@link WechatSyncService#existingDraftExists(WechatSetting, String)}）：
+     * 还在才是 {@value #DRAFT_ACTION_UPDATE}，已被删除（或校验给不出结论）就是
+     * {@value #DRAFT_ACTION_CREATE}；没有草稿记录、或开关关闭时不做校验，直接按新建处理。</p>
+     *
+     * <p>返回的是<b>提交时的判定</b>：执行阶段还会再校验一次（其间草稿仍可能被删除），因此最终结果
+     * 以 {@code wechat_sync_status} 与公众号草稿箱为准。</p>
+     */
+    private Mono<String> draftAction(WechatSetting setting, String existingDraftMediaId) {
+        boolean hasExistingDraft = existingDraftMediaId != null && !existingDraftMediaId.isBlank();
+        if (!hasExistingDraft || !setting.isUpdateExistingDraft()) {
+            return Mono.just(DRAFT_ACTION_CREATE);
+        }
+        return syncService.existingDraftExists(setting, existingDraftMediaId)
+            // 校验异常也按「已不在」处理：动作只用于如实说明本次会做什么，不能因此打断提交
+            .onErrorResume(error -> Mono.just(false))
+            .map(exists -> exists ? DRAFT_ACTION_UPDATE : DRAFT_ACTION_CREATE);
     }
 
     /**
@@ -206,20 +248,35 @@ public class WechatMcpSyncService {
     }
 
     /** 先落库任务（含输入快照）再异步执行，调用方无需等待，与 Console 提交接口同一顺序。 */
-    private Mono<Map<String, Object>> saveAndStart(String postName, SyncRequest request) {
+    private Mono<Map<String, Object>> saveAndStart(String postName, SyncRequest request,
+        String draftAction) {
         return taskStore.savePending(postName, request)
             .then(Mono.fromRunnable(() -> taskRunner.start(postName, request)))
-            .thenReturn(submitted(postName, request));
+            .thenReturn(submitted(postName, request, draftAction));
     }
 
-    /** 提交成功的返回值：文章标识、草稿标题与任务状态，供 MCP 客户端确认与后续查询。 */
-    private static Map<String, Object> submitted(String postName, SyncRequest request) {
+    /**
+     * 提交成功的返回值：文章标识、草稿标题、任务状态与本次提交的草稿动作
+     * （{@code draftAction}，见 {@link #draftAction(WechatSetting, String)}），供 MCP 客户端确认与后续查询。
+     *
+     * <p>动作以「更新 / 新建」直述本次提交会做什么：更新时执行阶段仍会先校验那份草稿是否还在，
+     * 已不在会改为新建，因此 {@code message} 里也写明了这层前提。</p>
+     */
+    private static Map<String, Object> submitted(String postName, SyncRequest request,
+        String draftAction) {
+        boolean update = DRAFT_ACTION_UPDATE.equals(draftAction);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("postName", postName);
         result.put("title", request.getTitle() == null ? "" : request.getTitle());
         result.put("status", SyncRecord.STATUS_PENDING);
-        result.put("message", "同步任务已提交，正在后台执行；完成后可在公众号草稿箱查看草稿");
-        log.info("MCP 工具已提交同步任务：文章《{}》，postName={}", request.getTitle(), postName);
+        result.put("draftAction", draftAction);
+        result.put("message", update
+            ? "同步任务已提交，正在后台执行；本次将更新该文章已有的那份草稿"
+                + "（草稿 id 不变，草稿箱里不会多出一份）；完成后可在公众号草稿箱查看"
+            : "同步任务已提交，正在后台执行；本次将新建一份草稿"
+                + "（该文章还没有草稿，或上次那份已不在微信侧）；完成后可在公众号草稿箱查看");
+        log.info("MCP 工具已提交同步任务：文章《{}》，postName={}，草稿动作={}",
+            request.getTitle(), postName, draftAction);
         return result;
     }
 
