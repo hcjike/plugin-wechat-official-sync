@@ -94,6 +94,8 @@ public class WechatSyncTaskStore {
             record.setMessage(spec.getMessage());
             record.setTime(spec.getTime());
             record.setMediaId(spec.getMediaId());
+            // 最近一次成功同步实际执行的动作（新建 / 更新）：MCP 状态工具与 Console 据此如实回报
+            record.setDraftAction(spec.getDraftAction());
             map.put(spec.getPostName(), record);
         });
     }
@@ -170,8 +172,9 @@ public class WechatSyncTaskStore {
      * 任务落到终态：写入状态/说明/mediaId，并清空输入快照——终态后不再需要重放，
      * 清空可避免正文 HTML 长期占用数据库空间。
      *
-     * <p><b>草稿 media_id 只增不减</b>：失败记录不携带 media_id，此时保留任务上原有的值——
-     * 上次成功同步写入的那份草稿多半仍然存在，保留它，用户重试时才能「更新草稿」而不是又新建一份。</p>
+     * <p><b>草稿 media_id 与动作只增不减</b>：失败记录不携带 media_id / 动作，此时保留任务上原有的值——
+     * 上次成功同步写入的那份草稿多半仍然存在，保留它，用户重试时才能「更新草稿」而不是又新建一份；
+     * 动作保留的是「当前这份草稿是怎么来的」，供 MCP 状态工具如实回报。</p>
      */
     public Mono<Void> complete(String postName, SyncRecord record) {
         return withRetry(() -> client.fetch(WechatSyncTask.class, taskName(postName))
@@ -182,6 +185,9 @@ public class WechatSyncTaskStore {
                 spec.setTime(record.getTime());
                 if (record.getMediaId() != null && !record.getMediaId().isBlank()) {
                     spec.setMediaId(record.getMediaId());
+                }
+                if (record.getDraftAction() != null && !record.getDraftAction().isBlank()) {
+                    spec.setDraftAction(record.getDraftAction());
                 }
                 // 快照清空后就再也拿不到标题了，先补记一次（升级前登记、升级后才落终态的任务靠它补齐）
                 fillTitleFromSnapshot(spec);
@@ -343,8 +349,9 @@ public class WechatSyncTaskStore {
     /**
      * 写入任务：已有同任务名的记录时在其上替换 spec，否则新建。
      *
-     * <p>替换 spec 时<b>保留原有的草稿 media_id</b>（新 spec 未携带时）：重复提交同一篇文章不应该丢掉
-     * 「上次同步写入的是哪份草稿」，否则每次同步都会新建一份草稿、越积越多；保留后执行时即可更新它。</p>
+     * <p>替换 spec 时<b>保留原有的草稿 media_id 与草稿动作</b>（新 spec 未携带时）：重复提交同一篇文章不应该
+     * 丢掉「上次同步写入的是哪份草稿、是新建还是更新」，否则每次同步都会新建一份草稿、越积越多；
+     * 保留后执行时即可更新它，状态查询也能继续回报上次的实际动作。</p>
      */
     private Mono<WechatSyncTask> upsert(WechatSyncTask fresh) {
         return client.fetch(WechatSyncTask.class, fresh.getMetadata().getName())
@@ -354,6 +361,11 @@ public class WechatSyncTaskStore {
                 if ((fresh.getSpec().getMediaId() == null || fresh.getSpec().getMediaId().isBlank())
                     && previousMediaId != null && !previousMediaId.isBlank()) {
                     fresh.getSpec().setMediaId(previousMediaId);
+                }
+                String previousDraftAction = previous == null ? null : previous.getDraftAction();
+                if ((fresh.getSpec().getDraftAction() == null || fresh.getSpec().getDraftAction().isBlank())
+                    && previousDraftAction != null && !previousDraftAction.isBlank()) {
+                    fresh.getSpec().setDraftAction(previousDraftAction);
                 }
                 existing.setSpec(fresh.getSpec());
                 return client.update(existing);

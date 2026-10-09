@@ -74,6 +74,17 @@ public class WechatSyncTask extends AbstractExtension {
         private String mediaId;
 
         /**
+         * 最近一次成功同步<b>实际</b>执行的草稿动作：{@link SyncRecord#DRAFT_ACTION_CREATE} /
+         * {@link SyncRecord#DRAFT_ACTION_UPDATE}。
+         *
+         * <p>与 {@link #mediaId} 同生命周期（成功时写入、失败时保留）：它描述的是「当前这份草稿是怎么来的」，
+         * 重复同步时的预判（本次将更新还是新建）另由提交入口按 {@link #mediaId} 现算，不落库。执行阶段
+         * 若发生「更新被微信网关 / WAF 拒绝，回退到新建草稿」，这里记的是回退后的真实动作（新建），
+         * MCP 工具与 Console 据此如实回报。</p>
+         */
+        private String draftAction;
+
+        /**
          * 已开始的执行次数：提交时清零，每次开始执行（含插件重启后的自动重放）+1；
          * 用于限制中断后的自动恢复次数，避免服务反复重启时无限重放。
          */

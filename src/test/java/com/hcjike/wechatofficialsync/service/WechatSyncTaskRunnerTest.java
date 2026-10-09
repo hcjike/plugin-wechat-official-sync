@@ -46,7 +46,8 @@ class WechatSyncTaskRunnerTest {
             .thenReturn(Mono.just(new WechatSetting()));
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.just(new BeautifySetting()));
-        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("media-1"));
+        when(syncService.submit(any(), any(), any(), any()))
+            .thenReturn(Mono.just(WechatSyncService.DraftResult.created("media-1")));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.runTask("post-a", request("文章 A"), null).block();
@@ -57,6 +58,8 @@ class WechatSyncTaskRunnerTest {
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
         assertThat(captor.getValue().getMediaId()).isEqualTo("media-1");
+        // 实际动作如实落库：MCP 状态工具据此回报「新建草稿」
+        assertThat(captor.getValue().getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_CREATE);
     }
 
     @Test
@@ -67,7 +70,8 @@ class WechatSyncTaskRunnerTest {
             .thenReturn(Mono.just(new WechatSetting()));
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.just(new BeautifySetting()));
-        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("DRAFT-1"));
+        when(syncService.submit(any(), any(), any(), any()))
+            .thenReturn(Mono.just(WechatSyncService.DraftResult.updated("DRAFT-1")));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.runTask("post-a", request("文章 A"), null).block();
@@ -76,6 +80,10 @@ class WechatSyncTaskRunnerTest {
         ArgumentCaptor<SyncRecord> captor = ArgumentCaptor.forClass(SyncRecord.class);
         verify(taskStore).complete(eq("post-a"), captor.capture());
         assertThat(captor.getValue().getMediaId()).isEqualTo("DRAFT-1");
+        // 更新既有草稿：动作记 "update"，由 MCP 状态工具按字段回报；
+        // 状态说明（文章列表状态列）不提「新建 / 更新」，只报结果
+        assertThat(captor.getValue().getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_UPDATE);
+        assertThat(captor.getValue().getMessage()).isEqualTo("已同步到公众号草稿箱");
     }
 
     @Test
@@ -134,7 +142,8 @@ class WechatSyncTaskRunnerTest {
             .thenReturn(Mono.just(new WechatSetting()));
         when(settingFetcher.fetch(eq(BeautifySetting.GROUP), eq(BeautifySetting.class)))
             .thenReturn(Mono.just(new BeautifySetting()));
-        when(syncService.submit(any(), any(), any(), any())).thenReturn(Mono.just("DRAFT-1"));
+        when(syncService.submit(any(), any(), any(), any()))
+            .thenReturn(Mono.just(WechatSyncService.DraftResult.updated("DRAFT-1")));
         when(taskStore.complete(anyString(), any())).thenReturn(Mono.empty());
 
         runner.resumeInterrupted().block();

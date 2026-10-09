@@ -5,6 +5,7 @@ import com.hcjike.wechatofficialsync.client.WechatApiException;
 import com.hcjike.wechatofficialsync.client.WechatMpClient;
 import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
+import com.hcjike.wechatofficialsync.model.SyncRecord;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -529,7 +530,7 @@ class WechatSyncServiceTest {
         stubCoverUpload(client, "MEDIA-OLD");
         when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
 
-        assertThat(createDraft(client, "DRAFT-1", false)).isEqualTo("DRAFT-NEW");
+        assertThat(createDraftResult(client, "DRAFT-1", false).mediaId()).isEqualTo("DRAFT-NEW");
 
         verify(client, never()).draftExists(anyString(), anyString(), anyString());
         verify(client, never()).updateDraft(anyString(), anyString(), anyString(), any());
@@ -558,9 +559,12 @@ class WechatSyncServiceTest {
         when(client.updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any()))
             .thenReturn(Mono.just("DRAFT-1"));
 
-        assertThat(createDraft(client, "DRAFT-1")).isEqualTo("DRAFT-1");
+        WechatSyncService.DraftResult result = createDraftResult(client, "DRAFT-1", true);
 
-        // 草稿还在：更新这一份，而不是再新建一份（重复同步不会在草稿箱里越积越多）
+        assertThat(result.mediaId()).isEqualTo("DRAFT-1");
+        // 草稿还在：更新这一份，而不是再新建一份（重复同步不会在草稿箱里越积越多）；
+        // 实际动作如实回报「更新」，MCP 状态工具据此告诉用户草稿是被更新的
+        assertThat(result.draftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_UPDATE);
         verify(client, times(1)).updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any());
         verify(client, never()).addDraft(anyString(), anyString(), any());
     }
@@ -624,6 +628,26 @@ class WechatSyncServiceTest {
             .hasMessageContaining("45011");
 
         verify(client, never()).addDraft(anyString(), anyString(), any());
+    }
+
+    @Test
+    void createsNewDraftWhenUpdateIsRejectedByGateway() {
+        // 更新被网关 / 代理层拒绝（如腾讯云 WAF 内容风控的 501：请求没到微信业务层、更新确定没有生效）：
+        // 改为新建草稿，而不是让整次同步失败（用户否则只能关掉「重复同步更新草稿」开关绕开）；
+        // 实际动作如实回报「新建」——草稿箱里确实多出了一份
+        WechatMpClient client = mock(WechatMpClient.class);
+        stubCoverUpload(client, "MEDIA-OLD");
+        when(client.draftExists(API_BASE, "TOKEN", "DRAFT-1")).thenReturn(Mono.just(true));
+        when(client.updateDraft(eq(API_BASE), eq("TOKEN"), eq("DRAFT-1"), any()))
+            .thenReturn(Mono.error(gatewayRejected()));
+        when(client.addDraft(eq(API_BASE), eq("TOKEN"), any())).thenReturn(Mono.just("DRAFT-NEW"));
+
+        WechatSyncService.DraftResult result = createDraftResult(client, "DRAFT-1", true);
+
+        assertThat(result.mediaId()).isEqualTo("DRAFT-NEW");
+        assertThat(result.draftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_CREATE);
+        verify(client, times(1)).updateDraft(anyString(), anyString(), anyString(), any());
+        verify(client, times(1)).addDraft(anyString(), anyString(), any());
     }
 
     // ---------- 草稿存在性校验（供 MCP 提交前判定本次是更新还是新建） ----------
@@ -694,16 +718,17 @@ class WechatSyncServiceTest {
 
     /** 默认开启「重复同步更新草稿」：非空 draftMediaId 时先校验、在则更新。 */
     private String createDraft(WechatMpClient client, String draftMediaId) {
-        return createDraft(client, draftMediaId, true);
+        return createDraftResult(client, draftMediaId, true).mediaId();
     }
 
     /**
-     * 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存）。
+     * 走一遍「封面 → 草稿」链路（正文不含图片，不涉及转存），返回草稿写入结果（media_id + 实际动作）。
      *
      * @param draftMediaId         上次成功同步写入的草稿 media_id；为空表示首次同步（直接新建草稿）
      * @param updateExistingDraft  插件设置「重复同步更新草稿」开关：关闭时每次同步都新建草稿
      */
-    private String createDraft(WechatMpClient client, String draftMediaId, boolean updateExistingDraft) {
+    private WechatSyncService.DraftResult createDraftResult(WechatMpClient client, String draftMediaId,
+        boolean updateExistingDraft) {
         WechatSetting setting = new WechatSetting();
         setting.setAppId(APP_ID);
         setting.setUpdateExistingDraft(updateExistingDraft);
@@ -732,6 +757,16 @@ class WechatSyncServiceTest {
     private static WechatApiException invalidMediaId() {
         return new WechatApiException("创建公众号草稿失败：{errcode=40007, errmsg=invalid media_id}",
             WechatApiException.INVALID_MEDIA_ID_ERRCODE);
+    }
+
+    /**
+     * 网关 / 代理层以非 2xx 拒绝（如腾讯云 WAF 内容风控拦截页 {@code 501}）：没有 errcode，
+     * 但可确定请求没有到达微信业务层、这次调用没有生效。
+     */
+    private static WechatApiException gatewayRejected() {
+        return new WechatApiException("微信接口返回 HTTP 501 Not Implemented"
+            + "（POST /cgi-bin/draft/update）；请求被腾讯云 WAF 按内容风控拦截（未到达微信接口，故无 errcode）",
+            null, 501);
     }
 
     // ---------- 正文附件链接 ----------

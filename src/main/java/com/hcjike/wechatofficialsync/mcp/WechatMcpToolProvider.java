@@ -134,10 +134,11 @@ public class WechatMcpToolProvider implements McpToolProvider {
         return McpToolDefinition.builder()
             .name(TOOL_PREVIEW)
             .title("获取微信同步预览")
-            .description("预览文章同步到微信公众号后的效果：正文 HTML（" + CONTENT_FORWARD_RULE + "）、"
-                + "写入草稿的标题（上限 64 字）、摘要（120 字）、作者（8 字）、原文链接与留言设置，"
-                + "以及被截断的字段名。截断规则：" + WECHAT_LENGTH_RULE + "。"
-                + "不调用微信接口、不写数据，可反复调用。")
+            .description("预览文章同步到公众号后的效果（不调用微信接口、不写数据，可反复调用）。"
+                + "content = 写入草稿的正文 HTML，" + CONTENT_FORWARD_RULE + "；"
+                + "title / digest / author = 截断后实际写入的值（" + WECHAT_LENGTH_RULE + "）；"
+                + "truncatedFields 列出被截断的字段名；sourceUrl 是「阅读原文」链接、"
+                + "commentMode 是留言设置。")
             .displayTitle("获取微信同步预览")
             .displayDescription("按同步规则生成文章的微信图文预览与草稿元信息，不调用微信接口、不提交任务。")
             .inputSchema(postNameSchema("要预览的文章 metadata.name"))
@@ -154,12 +155,13 @@ public class WechatMcpToolProvider implements McpToolProvider {
         return McpToolDefinition.builder()
             .name(TOOL_SUBMIT)
             .title("提交同步到微信")
-            .description("把文章提交同步到微信公众号草稿箱：先预检（微信配置、封面图、是否正在同步中），"
-                + "通过后创建后台任务并立即返回；封面与正文图片会自动转存到微信素材库、正文按公众号排版美化。"
-                + "标题 / 作者 / 摘要超长不会提交失败，会先截断再提交（" + WECHAT_LENGTH_RULE
-                + "；可用 wechat_sync_preview 查看截断后的值）。"
-                + "返回的 draftAction 说明本次是更新已有草稿（update）还是新建草稿（create），"
-                + "直接据此回复用户即可。同一篇文章同步中时重复提交会被拒绝。")
+            .description("把文章提交同步到公众号草稿箱：先预检（微信配置、封面图、是否正在同步中），"
+                + "通过即创建后台任务并立即返回。同步在后台执行：封面与正文图片自动转存到微信素材库、"
+                + "正文按公众号排版美化；标题 / 作者 / 摘要超长不会失败，会先截断再提交（"
+                + WECHAT_LENGTH_RULE + "；可用 wechat_sync_preview 查看截断后的值）。"
+                + "返回只表示已提交、正在后台执行——不要据此说「已同步成功」或「新建 / 更新了草稿」，"
+                + "请用 wechat_sync_status 查询并按它的 draftAction 作答。"
+                + "同一篇文章同步中时重复提交会被拒绝。")
             .displayTitle("提交同步到微信")
             .displayDescription("预检通过后创建后台同步任务，把文章同步到微信公众号草稿箱。")
             .inputSchema(postNameSchema("要同步的文章 metadata.name"))
@@ -176,9 +178,11 @@ public class WechatMcpToolProvider implements McpToolProvider {
         return McpToolDefinition.builder()
             .name(TOOL_STATUS)
             .title("查询微信同步状态")
-            .description("查询文章最近一次同步到微信公众号的状态（提交同步后用它轮询）："
-                + "PENDING 执行中 / SUCCESS 已写入草稿箱 / FAILED 失败（message 为原因）/ NONE 尚未同步过。"
-                + "只读，不调用微信接口、不写数据。")
+            .description("查询文章最近一次同步的结果（提交后用它轮询），只读、不调用微信接口。"
+                + "status：PENDING 执行中 / SUCCESS 已写入草稿箱 / FAILED 失败（message 是原因）/ NONE 尚未同步过。"
+                + "SUCCESS 时必须按 draftAction 明说本次是新建还是更新，不要自行推断、也不要沿用提交时的说法："
+                + "update = 更新了已有草稿（草稿箱没多出一份）；create = 新建了一份草稿（草稿箱多出一份）；"
+                + "空串 = 还没同步过。")
             .displayTitle("查询微信同步状态")
             .displayDescription("查询文章最近一次同步到公众号的状态与失败原因，不调用微信接口。")
             .inputSchema(postNameSchema("要查询状态的文章 metadata.name"))
@@ -196,8 +200,9 @@ public class WechatMcpToolProvider implements McpToolProvider {
             .name(TOOL_CLEANUP)
             .title("清理素材缓存")
             .description("立即清理一次公众号素材缓存（缓存用于避免同一张图重复上传到微信素材库）："
-                + "只删除超过保留期且最近未被使用的记录，仍在复用的不会被删；插件设置里「缓存保留天数」"
-                + "留空、0 或负数表示全部保留，此时不删除。不影响每天 0 点的自动清理。")
+                + "只删除超过保留期且最近未使用的记录，仍在复用的不会被删；"
+                + "插件设置「缓存保留天数」留空 / 0 / 负数表示全部保留，此时不删除。"
+                + "不影响每天 0 点的自动清理。")
             .displayTitle("清理素材缓存")
             .displayDescription("立即清理超过保留期且最近未被使用的素材缓存记录，并返回清理条数与保留策略。")
             .inputSchema(noArgumentSchema())
@@ -243,7 +248,7 @@ public class WechatMcpToolProvider implements McpToolProvider {
             "type", "object",
             "properties", Map.of(
                 "content", Map.of("type", "string",
-                    "description", "正文 HTML（就是写入草稿的内容，不是 Markdown）：" + CONTENT_FORWARD_RULE
+                    "description", "写入草稿的正文 HTML（不是 Markdown）：" + CONTENT_FORWARD_RULE
                         + "；图片与链接已是完整地址，可直接加载"),
                 "title", Map.of("type", "string",
                     "description", "写入草稿的标题；微信上限 64 字，超出自动截断（"
@@ -269,9 +274,9 @@ public class WechatMcpToolProvider implements McpToolProvider {
     /**
      * 提交工具的输出结构：与 {@link WechatMcpSyncService#submit} 返回的字段一一对应。
      *
-     * <p>{@code draftAction} 是<b>本次提交将要执行的草稿动作</b>（更新既有草稿 / 新建草稿），
-     * 提交时已实查该文章上次写入的草稿是否还在微信侧，因此如实反映本次会做什么——
-     * 客户端无需理解配置项，直接据此说明即可。</p>
+     * <p><b>没有草稿动作字段</b>：提交时的「更新 / 新建」只是预判（执行阶段仍可能回退成新建），放进返回值
+     * 会让客户端把它当结果、答复失真；动作只由 {@link WechatMcpSyncService#status} 的
+     * {@code draftAction} 给出（那里是实际动作）。</p>
      */
     private static Map<String, Object> submitOutputSchema() {
         return Map.of(
@@ -283,21 +288,16 @@ public class WechatMcpToolProvider implements McpToolProvider {
                     "description", "本次同步的文章标题"),
                 "status", Map.of("type", "string",
                     "description", "PENDING 表示已提交、正在后台执行"),
-                "draftAction", Map.of("type", "string",
-                    "enum", List.of(WechatMcpSyncService.DRAFT_ACTION_UPDATE,
-                        WechatMcpSyncService.DRAFT_ACTION_CREATE),
-                    "description", "本次提交将要执行的动作（提交时已查过上次那份草稿是否还在微信侧）："
-                        + "update 更新那份草稿；create 新建一份草稿（还没有草稿、草稿已被删除，"
-                        + "或未开启草稿更新）。据此告诉用户本次是更新还是新建即可"),
                 "message", Map.of("type", "string",
-                    "description", "提交结果说明")),
-            "required", List.of("postName", "title", "status", "draftAction", "message"));
+                    "description", "提交结果说明；本次是新建还是更新请以 wechat_sync_status 的 "
+                        + "draftAction 为准")),
+            "required", List.of("postName", "title", "status", "message"));
     }
 
     /**
      * 状态查询工具的输出结构：与 {@link WechatMcpSyncService#status} 返回的字段一一对应。
-     * 四个字段在任何情况下都存在——尚未同步过时 {@code status} 为 {@code NONE}、{@code time} 为空串，
-     * 因此 {@code required} 不会因「还没同步」而校验失败。
+     * 五个字段在任何情况下都存在——尚未同步过时 {@code status} 为 {@code NONE}、{@code time} 与
+     * {@code draftAction} 为空串，因此 {@code required} 不会因「还没同步」而校验失败。
      */
     private static Map<String, Object> statusOutputSchema() {
         return Map.of(
@@ -310,8 +310,14 @@ public class WechatMcpToolProvider implements McpToolProvider {
                 "message", Map.of("type", "string",
                     "description", "说明；FAILED 时为微信返回的失败原因"),
                 "time", Map.of("type", "string",
-                    "description", "更新时间（ISO-8601）；尚未同步过时为空串")),
-            "required", List.of("postName", "status", "message", "time"));
+                    "description", "更新时间（ISO-8601）；尚未同步过时为空串"),
+                "draftAction", Map.of("type", "string",
+                    "enum", List.of(WechatMcpSyncService.DRAFT_ACTION_CREATE,
+                        WechatMcpSyncService.DRAFT_ACTION_UPDATE, ""),
+                    "description", "本次实际执行的动作，回答用户时按它说、不要自行推断："
+                        + "update = 更新了已有草稿（草稿箱没多出一份）；create = 新建了一份草稿"
+                        + "（草稿箱多出一份）；空串 = 尚未同步过")),
+            "required", List.of("postName", "status", "message", "time", "draftAction"));
     }
 
     /**
@@ -347,7 +353,7 @@ public class WechatMcpToolProvider implements McpToolProvider {
      * {@link #CONTENT_FORWARD_RULE}：预览正文自带全部样式，原样输出才不会与后台预览不一致。
      */
     private static String previewSummary(Map<String, Object> result) {
-        return "已生成《" + result.get("title") + "》的同步预览：请把 content 字段里的整段 HTML "
+        return "已生成《" + result.get("title") + "》的同步预览：请把 content 里的整段 HTML "
             + "原样输出给用户（" + CONTENT_FORWARD_RULE + "）";
     }
 
@@ -358,17 +364,16 @@ public class WechatMcpToolProvider implements McpToolProvider {
     }
 
     /**
-     * 提交结果的一句话说明。<b>把草稿动作直接写进这段文本</b>：部分客户端只把工具结果的文本喂给模型
-     * （不传 {@code structuredContent}，也不会把 {@code outputSchema} 的字段说明放进上下文），
-     * 只把动作放在字段里时模型看不到、只能自行猜测；写进结果文本后，模型照抄即可如实回答。
+     * 提交结果的一句话说明：只说「已提交、正在后台执行」，并把动作指向状态查询。
+     *
+     * <p>部分客户端只把工具结果的文本喂给模型（不传 {@code structuredContent}，也不会把
+     * {@code outputSchema} 的字段说明放进上下文）。因此文本里<b>不能写死</b>提交时预判的「会更新 / 会新建」：
+     * 模型照抄就会把预判当成结果（执行阶段可能回退成新建），故这里只指向
+     * {@code wechat_sync_status} 的 {@code draftAction}。</p>
      */
     private static String submitSummary(Map<String, Object> result) {
-        boolean update = WechatMcpSyncService.DRAFT_ACTION_UPDATE
-            .equals(String.valueOf(result.get("draftAction")));
         return "已提交《" + result.get("title") + "》的同步任务，正在后台执行；"
-            + (update
-                ? "本次会更新该文章已有的那份草稿（draftAction=update），可如实告诉用户「本次会更新草稿」"
-                : "本次会新建一份草稿（draftAction=create），可如实告诉用户「本次会新建草稿」");
+            + "本次是新建还是更新，请用 wechat_sync_status 查询（看它的 draftAction）";
     }
 
     /** 查询同步状态：返回该文章最近一次同步的状态与说明。 */
@@ -377,12 +382,27 @@ public class WechatMcpToolProvider implements McpToolProvider {
             .map(result -> McpToolResult.success(result, statusSummary(result))));
     }
 
-    /** 状态查询结果的一句话说明：状态码与说明一并给出，模型无需再去结构化字段里翻。 */
+    /**
+     * 状态查询结果的一句话说明：状态码、<b>实际草稿动作</b>与说明一并给出（同样是为了只读文本摘要的
+     * 客户端：动作放在字段里时模型看不到，写进文本才能如实回答「新建还是更新」）。
+     */
     private static String statusSummary(Map<String, Object> result) {
         Object message = result.get("message");
         String detail = message == null ? "" : String.valueOf(message).trim();
-        return "《" + result.get("postName") + "》最近一次同步状态：" + result.get("status")
-            + (detail.isEmpty() ? "" : "（" + detail + "）");
+        String action = draftActionText(result.get("draftAction"));
+        return "《" + result.get("postName") + "》最近一次同步：" + result.get("status")
+            + (detail.isEmpty() ? "" : "，" + detail)
+            // 明确要求模型照字段作答：只说「已同步成功」等于没回答本次是新建还是更新
+            + (action.isEmpty() ? "" : "。请告诉用户：本次" + action + "（以 draftAction 为准，不要自行推断）");
+    }
+
+    /** 草稿动作的中文说明（新建 / 更新）；动作未知（空串、未同步过）时返回空串。 */
+    private static String draftActionText(Object draftAction) {
+        String value = draftAction == null ? "" : String.valueOf(draftAction);
+        if (WechatMcpSyncService.DRAFT_ACTION_UPDATE.equals(value)) {
+            return "更新既有草稿";
+        }
+        return WechatMcpSyncService.DRAFT_ACTION_CREATE.equals(value) ? "新建草稿" : "";
     }
 
     /** 清理素材缓存：删除超过保留期且最近未被使用的缓存记录，返回清理条数与当前缓存配置。 */

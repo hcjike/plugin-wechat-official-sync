@@ -215,6 +215,9 @@ class WechatMpClientTest {
         RecordedRequest request = server.lastRequest();
         assertThat(request.uri()).contains("/cgi-bin/draft/update").contains("access_token=TOKEN");
         assertThat(request.contentType()).startsWith("application/json");
+        // 微信网关校验 Content-Length：JSON 请求同样以显式长度发送，不走分块传输
+        assertThat(request.header("Transfer-Encoding")).isNull();
+        assertThat(request.contentLength()).isEqualTo(request.body().length);
         // draft/update 的 articles 是「单个对象」（不是 draft/add 的数组），并带 media_id 与 index
         assertThat(request.bodyText())
             .contains("\"media_id\":\"DRAFT-1\"")
@@ -234,6 +237,69 @@ class WechatMpClientTest {
 
         assertThat(error).hasMessageContaining("更新公众号草稿失败");
         assertThat(error.isInvalidMediaId()).isTrue();
+    }
+
+    @Test
+    void nonSuccessHttpStatusIsSurfacedWithEndpointAndResponseBody() {
+        // 微信业务错误一律是 200 + errcode；非 2xx 只可能来自网关/代理层（如 501 Not Implemented）。
+        // 这类响应没有 errcode 可依据，响应体是唯一线索，必须写进失败原因，否则排查只能靠猜
+        server.planStatus(501, "<html><body><h1>501 Not Implemented</h1></body></html>");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.updateDraft(server.baseUrl(), "TOKEN", "DRAFT-1", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        assertThat(error.getMessage())
+            .contains("HTTP 501 Not Implemented")
+            .contains("POST /cgi-bin/draft/update")
+            .contains("501 Not Implemented");
+        // 只带接口路径、不带查询串：失败原因里不会出现 access_token
+        assertThat(error.getMessage()).doesNotContain("access_token").doesNotContain("TOKEN");
+    }
+
+    @Test
+    void nonSuccessHttpStatusWithoutBodyStillCarriesStatusLine() {
+        // 网关只回状态行（响应体为空）时，失败原因至少要有「状态行 + 出错接口」
+        server.planStatus(502, "");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.addDraft(server.baseUrl(), "TOKEN", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        assertThat(error.getMessage())
+            .contains("HTTP 502 Bad Gateway")
+            .contains("POST /cgi-bin/draft/add");
+    }
+
+    @Test
+    void tencentWafBlockPageIsRecognizedAndExplained() {
+        // 实测：更新草稿的请求被腾讯云 WAF 按内容风控拦下时，返回的就是这张 501 拦截页
+        // （请求根本没到微信接口，故既没有 errcode 也没有 rid）。失败原因要直接点明性质与出路
+        server.planStatus(501, "<!DOCTYPE html><html><head><script>var i=location.href;"
+            + "window.location.href=\"https://waf.tencent.com/501page.html?u=\"+location.origin;</script>");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.updateDraft(server.baseUrl(), "TOKEN", "DRAFT-1", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        assertThat(error.getMessage())
+            .contains("HTTP 501 Not Implemented")
+            .contains("POST /cgi-bin/draft/update")
+            .contains("腾讯云 WAF")
+            .contains("关闭「重复同步更新草稿」");
+    }
+
+    @Test
+    void oversizedErrorBodyIsTruncatedInFailureReason() {
+        server.planStatus(500, "<html>" + "x".repeat(1000) + "</html>");
+
+        WechatApiException error = catchThrowableOfType(
+            () -> client.updateDraft(server.baseUrl(), "TOKEN", "DRAFT-1", Map.of("title", "hello")).block(),
+            WechatApiException.class);
+
+        // 任务记录里只留开头一段，不把整页错误 HTML 塞进去
+        assertThat(error.getMessage()).contains("…");
+        assertThat(error.getMessage().length()).isLessThan(400);
     }
 
     @Test

@@ -207,10 +207,11 @@ class WechatMcpSyncServiceTest {
 
         assertThat(result).containsEntry("status", SyncRecord.STATUS_PENDING);
         assertThat(result).containsEntry("postName", "post-a");
-        // 该文章尚未成功同步过（没有已知草稿）：回传的草稿动作就是「新建」
-        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
+        // 提交返回值不带草稿动作：它只是提交时的预判（执行阶段可能改为新建），
+        // 回传字段会让 AI 把预判当结果；最终动作一律由 wechat_sync_status 的 draftAction 给出
+        assertThat(result).doesNotContainKey("draftAction");
         // 与 MCP 工具声明的 outputSchema 对齐：多出/缺少字段都会被 MCP Server 判为契约不一致
-        assertThat(result).containsOnlyKeys("postName", "title", "status", "draftAction", "message");
+        assertThat(result).containsOnlyKeys("postName", "title", "status", "message");
         // 与 Console 一致的顺序：先落库任务（含输入快照）再异步执行
         verify(taskStore).savePending(eq("post-a"), any());
         verify(taskRunner).start(eq("post-a"), any());
@@ -221,14 +222,13 @@ class WechatMcpSyncServiceTest {
         givenPost();
         givenSubmitReady();
         when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", successRecord("DRAFT-1"))));
-        // 该文章已有草稿，且实查确认那份草稿仍在微信侧：动作才是「更新」
+        // 该文章已有草稿，且实查确认那份草稿仍在微信侧：说明里才是「预计更新」
         when(syncService.existingDraftExists(any(), eq("DRAFT-1"))).thenReturn(Mono.just(true));
 
         Map<String, Object> result = mcpSyncService.submit("post-a").block();
 
         assertThat(result).isNotNull();
-        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE);
-        assertThat((String) result.get("message")).contains("更新");
+        assertThat((String) result.get("message")).contains("预计更新");
     }
 
     @Test
@@ -242,8 +242,7 @@ class WechatMcpSyncServiceTest {
         Map<String, Object> result = mcpSyncService.submit("post-a").block();
 
         assertThat(result).isNotNull();
-        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
-        assertThat((String) result.get("message")).contains("新建一份草稿");
+        assertThat((String) result.get("message")).contains("预计新建一份草稿");
     }
 
     @Test
@@ -258,7 +257,7 @@ class WechatMcpSyncServiceTest {
         Map<String, Object> result = mcpSyncService.submit("post-a").block();
 
         assertThat(result).isNotNull();
-        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
+        assertThat((String) result.get("message")).contains("预计新建");
     }
 
     @Test
@@ -276,8 +275,7 @@ class WechatMcpSyncServiceTest {
 
         // 关闭开关后本次只会新建：连草稿校验都省掉（不同微信接口）
         assertThat(result).isNotNull();
-        assertThat(result).containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE);
-        assertThat((String) result.get("message")).contains("新建一份草稿");
+        assertThat((String) result.get("message")).contains("预计新建一份草稿");
         verify(syncService, never()).existingDraftExists(any(), anyString());
     }
 
@@ -333,11 +331,33 @@ class WechatMcpSyncServiceTest {
 
         Map<String, Object> result = mcpSyncService.status("post-a").block();
 
-        // 「尚未同步过」是正常结果而非错误，四个字段都在，time 为空串
-        assertThat(result).containsOnlyKeys("postName", "status", "message", "time");
+        // 「尚未同步过」是正常结果而非错误，五个字段都在，time 与 draftAction 为空串
+        assertThat(result).containsOnlyKeys("postName", "status", "message", "time", "draftAction");
         assertThat(result).containsEntry("status", WechatMcpSyncService.STATUS_NONE);
         assertThat(result).containsEntry("message", "该文章尚未同步过");
         assertThat(result).containsEntry("time", "");
+        assertThat(result).containsEntry("draftAction", "");
+    }
+
+    @Test
+    void statusReportsActualDraftActionAfterSuccess() {
+        // 实际动作来自执行阶段的记录（不是提交时的预判）：更新被微信网关 / WAF 拒绝而回退新建时，
+        // 这里就是 create——MCP 客户端据此如实回答「新建了一份草稿」，不会说成更新
+        givenPost();
+        SyncRecord success = new SyncRecord();
+        success.setStatus(SyncRecord.STATUS_SUCCESS);
+        success.setMessage("已同步到公众号草稿箱");
+        success.setMediaId("MEDIA-1");
+        success.setDraftAction(SyncRecord.DRAFT_ACTION_CREATE);
+        success.setTime("2026-10-09T00:00:00Z");
+        when(taskStore.findStatusMap()).thenReturn(Mono.just(Map.of("post-a", success)));
+
+        Map<String, Object> result = mcpSyncService.status("post-a").block();
+
+        // 动作只能从字段读：状态说明里不再写「新建 / 更新」（它同时展示在文章列表的状态列）
+        assertThat(result)
+            .containsEntry("draftAction", SyncRecord.DRAFT_ACTION_CREATE)
+            .containsEntry("message", "已同步到公众号草稿箱");
     }
 
     @Test

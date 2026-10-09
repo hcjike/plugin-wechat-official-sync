@@ -132,9 +132,15 @@ public class WechatSyncTaskRunner {
                 // 未配置「正文美化」分组时用内置默认值，保证美化不中断
                 .defaultIfEmpty(new BeautifySetting())
                 .flatMap(beautify -> syncService.submit(request, setting, beautify, draftMediaId)))
-            .flatMap(mediaId -> {
-                log.info("文章《{}》已同步到公众号草稿箱，media_id={}", request.getTitle(), mediaId);
-                return taskStore.complete(postName, SyncRecord.success(mediaId));
+            .flatMap(result -> {
+                // 实际动作可能不同于提交时的预判（更新被网关 / WAF 拒绝、或草稿已失效时回退为新建），
+                // 故按结果如实记录：动作随成功记录落库，MCP 状态工具据此回报「新建 / 更新」
+                // （状态说明本身不写动作——它展示在文章列表，那里只需要一句结果）
+                log.info("文章《{}》已同步到公众号草稿箱（{}），media_id={}", request.getTitle(),
+                    SyncRecord.DRAFT_ACTION_UPDATE.equals(result.draftAction()) ? "更新既有草稿" : "新建草稿",
+                    result.mediaId());
+                return taskStore.complete(postName,
+                    SyncRecord.success(result.mediaId(), result.draftAction()));
             })
             .onErrorResume(error -> {
                 log.error("文章《{}》同步到公众号失败：{}", request.getTitle(), error.getMessage(), error);

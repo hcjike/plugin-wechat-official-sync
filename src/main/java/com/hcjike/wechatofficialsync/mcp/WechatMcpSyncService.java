@@ -55,11 +55,17 @@ public class WechatMcpSyncService {
     /** 状态查询：该文章尚未同步过（正常结果，不是错误）。 */
     static final String STATUS_NONE = "NONE";
 
-    /** 提交动作：本次将**更新**该文章既有草稿（该文章上次成功同步写入过草稿，草稿 media_id 不变）。 */
-    static final String DRAFT_ACTION_UPDATE = "update";
+    /**
+     * 提交动作：本次将**更新**该文章既有草稿（该文章上次成功同步写入过草稿，草稿 media_id 不变）。
+     * 取值与任务记录里的实际动作同域，见 {@link SyncRecord#DRAFT_ACTION_UPDATE}。
+     */
+    static final String DRAFT_ACTION_UPDATE = SyncRecord.DRAFT_ACTION_UPDATE;
 
-    /** 提交动作：本次将**新建**一份草稿（该文章还没成功同步过，或已关闭「重复同步更新草稿」）。 */
-    static final String DRAFT_ACTION_CREATE = "create";
+    /**
+     * 提交动作：本次将**新建**一份草稿（该文章还没成功同步过，或已关闭「重复同步更新草稿」）。
+     * 取值与任务记录里的实际动作同域，见 {@link SyncRecord#DRAFT_ACTION_CREATE}。
+     */
+    static final String DRAFT_ACTION_CREATE = SyncRecord.DRAFT_ACTION_CREATE;
 
     private final ReactiveExtensionClient client;
 
@@ -154,10 +160,11 @@ public class WechatMcpSyncService {
      * 预检不通过（微信配置、封面图等）时不落库、直接报告问题；实际同步在后台线程执行，
      * 结果写入任务记录（文章列表状态列 / 公众号草稿箱可查）。</p>
      *
-     * <p>返回值里的 {@code draftAction}（{@value #DRAFT_ACTION_UPDATE} / {@value #DRAFT_ACTION_CREATE}）
-     * 就是<b>本次提交将要执行的动作</b>——该文章已有草稿时会实查那份草稿是否仍在微信侧，因此如实反映
-     * 「更新既有草稿」还是「新建草稿」（草稿已被删除就是新建），MCP 客户端（AI 助手）无需再理解配置项，
-     * 直接据此告诉用户即可，而不是只能笼统地说「已提交同步」。</p>
+     * <p>返回值<b>只确认「已提交、正在后台执行」</b>，<b>不含本次最终是「更新」还是「新建」</b>：提交时判断的
+     * 动作只是预判，执行阶段还有两处会改走新建——草稿在执行前被删除，或更新请求被微信网关 / WAF 拒绝
+     * （如内容风控的 {@code 501}）。把它放进返回值会让 MCP 客户端（AI 助手）把预判当成结果、答复失真，
+     * 因此这里只把它写成 {@code message} 里的「预计」，最终动作一律以 {@link #status(String)} 的
+     * {@code draftAction}（实际动作）为准。</p>
      */
     public Mono<Map<String, Object>> submit(String postName) {
         return buildRequest(postName)
@@ -194,15 +201,15 @@ public class WechatMcpSyncService {
     }
 
     /**
-     * 本次提交将要执行的草稿动作。
+     * 本次提交<b>预计</b>执行的草稿动作：只用于提交结果的说明文案与日志，不作为返回字段。
      *
      * <p>该文章上次成功同步写入过草稿、且插件设置里开启了「重复同步更新草稿」时，<b>实查一次</b>那份草稿
      * 是否仍在微信侧（见 {@link WechatSyncService#existingDraftExists(WechatSetting, String)}）：
      * 还在才是 {@value #DRAFT_ACTION_UPDATE}，已被删除（或校验给不出结论）就是
      * {@value #DRAFT_ACTION_CREATE}；没有草稿记录、或开关关闭时不做校验，直接按新建处理。</p>
      *
-     * <p>返回的是<b>提交时的判定</b>：执行阶段还会再校验一次（其间草稿仍可能被删除），因此最终结果
-     * 以 {@code wechat_sync_status} 与公众号草稿箱为准。</p>
+     * <p>执行阶段还会再校验一次（其间草稿仍可能被删除），且更新被微信网关 / WAF 拒绝时会改为新建，
+     * 因此它只是预判：最终动作看 {@link #status(String)} 的 {@code draftAction}。</p>
      */
     private Mono<String> draftAction(WechatSetting setting, String existingDraftMediaId) {
         boolean hasExistingDraft = existingDraftMediaId != null && !existingDraftMediaId.isBlank();
@@ -222,6 +229,11 @@ public class WechatMcpSyncService {
      * （已写入公众号草稿箱）、{@code FAILED}（失败，{@code message} 为失败原因）、
      * {@code NONE}（该文章尚未同步过——这是正常结果而非错误）。只读查询：不调用微信接口、
      * 不写任何记录；文章不存在时按 {@code NOT_FOUND} 报错。</p>
+     *
+     * <p>{@code draftAction} 是<b>最近一次成功同步实际执行的动作</b>（{@value #DRAFT_ACTION_CREATE} /
+     * {@value #DRAFT_ACTION_UPDATE}）：与 {@link #submit(String)} 返回的「提交时预判」不同，这里记录的是
+     * 执行结果——更新被微信网关 / WAF 拒绝、或草稿已失效时会回退成新建，此时是
+     * {@value #DRAFT_ACTION_CREATE}。尚未成功同步过时为空串。</p>
      */
     public Mono<Map<String, Object>> status(String postName) {
         return requirePost(postName)
@@ -239,11 +251,13 @@ public class WechatMcpSyncService {
             result.put("status", STATUS_NONE);
             result.put("message", "该文章尚未同步过");
             result.put("time", "");
+            result.put("draftAction", "");
             return result;
         }
         result.put("status", nullToEmpty(record.getStatus()));
         result.put("message", nullToEmpty(record.getMessage()));
         result.put("time", nullToEmpty(record.getTime()));
+        result.put("draftAction", nullToEmpty(record.getDraftAction()));
         return result;
     }
 
@@ -256,11 +270,12 @@ public class WechatMcpSyncService {
     }
 
     /**
-     * 提交成功的返回值：文章标识、草稿标题、任务状态与本次提交的草稿动作
-     * （{@code draftAction}，见 {@link #draftAction(WechatSetting, String)}），供 MCP 客户端确认与后续查询。
+     * 提交成功的返回值：文章标识、草稿标题、任务状态与说明——<b>不含草稿动作</b>
+     * （{@code draftAction} 只有状态查询会返回，且那里才是实际动作）。
      *
-     * <p>动作以「更新 / 新建」直述本次提交会做什么：更新时执行阶段仍会先校验那份草稿是否还在，
-     * 已不在会改为新建，因此 {@code message} 里也写明了这层前提。</p>
+     * <p>{@code message} 里以「预计」直述本次提交打算做什么：执行阶段仍可能改为新建（草稿被删除、
+     * 更新被微信网关 / WAF 拒绝），把预判当结果回答就会失真，故文案里同时点明最终以
+     * {@code wechat_sync_status} 的 {@code draftAction} 为准。</p>
      */
     private static Map<String, Object> submitted(String postName, SyncRequest request,
         String draftAction) {
@@ -269,13 +284,14 @@ public class WechatMcpSyncService {
         result.put("postName", postName);
         result.put("title", request.getTitle() == null ? "" : request.getTitle());
         result.put("status", SyncRecord.STATUS_PENDING);
-        result.put("draftAction", draftAction);
         result.put("message", update
-            ? "同步任务已提交，正在后台执行；本次将更新该文章已有的那份草稿"
-                + "（草稿 id 不变，草稿箱里不会多出一份）；完成后可在公众号草稿箱查看"
-            : "同步任务已提交，正在后台执行；本次将新建一份草稿"
-                + "（该文章还没有草稿，或上次那份已不在微信侧）；完成后可在公众号草稿箱查看");
-        log.info("MCP 工具已提交同步任务：文章《{}》，postName={}，草稿动作={}",
+            ? "同步任务已提交，正在后台执行；预计更新该文章已有的那份草稿（草稿 id 不变，"
+                + "草稿箱里不会多出一份）；若微信侧拒绝该更新（如风控拦截）、或草稿在执行前被删除，"
+                + "会自动改为新建一份草稿——本次到底是新建还是更新，以 wechat_sync_status 返回的 "
+                + "draftAction 为准，不要按这里的预计回答"
+            : "同步任务已提交，正在后台执行；预计新建一份草稿（该文章还没有草稿，或上次那份已不在微信侧）；"
+                + "完成后请用 wechat_sync_status 查询，按它返回的 draftAction 说明本次是新建还是更新");
+        log.info("MCP 工具已提交同步任务：文章《{}》，postName={}，预计草稿动作={}",
             request.getTitle(), postName, draftAction);
         return result;
     }

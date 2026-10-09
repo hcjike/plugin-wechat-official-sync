@@ -186,6 +186,7 @@ class WechatSyncTaskStoreTest {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         WechatSyncTask existing = task("post-a", SyncRecord.STATUS_PENDING, 1);
         existing.getSpec().setMediaId("DRAFT-1");
+        existing.getSpec().setDraftAction(SyncRecord.DRAFT_ACTION_UPDATE);
         when(client.fetch(eq(WechatSyncTask.class), eq("wechat-sync-post-a")))
             .thenReturn(Mono.just(existing));
         when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
@@ -194,6 +195,8 @@ class WechatSyncTaskStoreTest {
 
         assertThat(existing.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_FAILED);
         assertThat(existing.getSpec().getMediaId()).isEqualTo("DRAFT-1");
+        // 动作同样保留：它描述的是「当前这份草稿是怎么来的」，MCP 状态查询据此继续如实回报
+        assertThat(existing.getSpec().getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_UPDATE);
     }
 
     @Test
@@ -205,10 +208,13 @@ class WechatSyncTaskStoreTest {
             .thenReturn(Mono.just(existing));
         when(client.update(any(WechatSyncTask.class))).thenAnswer(inv -> Mono.just(inv.getArgument(0)));
 
-        new WechatSyncTaskStore(client).complete("post-a", SyncRecord.success("media-9")).block();
+        new WechatSyncTaskStore(client)
+            .complete("post-a", SyncRecord.success("media-9", SyncRecord.DRAFT_ACTION_CREATE)).block();
 
         assertThat(existing.getSpec().getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
         assertThat(existing.getSpec().getMediaId()).isEqualTo("media-9");
+        // 实际动作随成功记录落库（更新被拒回退新建时记的是 create），供 MCP 状态查询回报
+        assertThat(existing.getSpec().getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_CREATE);
         // 终态后清空输入快照，避免正文 HTML 长期占用数据库空间
         assertThat(existing.getSpec().getRequest()).isNull();
     }
@@ -218,6 +224,7 @@ class WechatSyncTaskStoreTest {
         ReactiveExtensionClient client = mock(ReactiveExtensionClient.class);
         WechatSyncTask success = task("post-a", SyncRecord.STATUS_SUCCESS, 1);
         success.getSpec().setMediaId("media-1");
+        success.getSpec().setDraftAction(SyncRecord.DRAFT_ACTION_CREATE);
         WechatSyncTask failed = task("post-b", SyncRecord.STATUS_FAILED, 1);
         failed.getSpec().setMessage("封面下载失败");
         when(client.listAll(eq(WechatSyncTask.class), any(ListOptions.class), any(Sort.class)))
@@ -228,6 +235,8 @@ class WechatSyncTaskStoreTest {
         assertThat(statusMap).containsOnlyKeys("post-a", "post-b");
         assertThat(statusMap.get("post-a").getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
         assertThat(statusMap.get("post-a").getMediaId()).isEqualTo("media-1");
+        // 状态投影带上实际动作：MCP 状态工具与 Console 都从这份投影读
+        assertThat(statusMap.get("post-a").getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_CREATE);
         assertThat(statusMap.get("post-b").getMessage()).isEqualTo("封面下载失败");
     }
 
