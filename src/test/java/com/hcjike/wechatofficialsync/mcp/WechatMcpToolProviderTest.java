@@ -73,39 +73,70 @@ class WechatMcpToolProviderTest {
 
     @Test
     void declaresOutputSchemaMatchingSubmitResultFields() {
+        // 提交结果不含 draftAction：它只是提交时的预判（执行阶段可能改为新建），
+        // 作为字段回传会让 AI 把预判当结果；动作只由 wechat_sync_status 给出
         assertThat(requiredKeys(WechatMcpToolProvider.TOOL_SUBMIT))
-            .containsExactlyInAnyOrder("postName", "title", "status", "draftAction", "message");
+            .containsExactlyInAnyOrder("postName", "title", "status", "message");
     }
 
     @Test
-    void describesWhetherSubmitUpdatesOrCreatesTheDraft() {
+    void submitResultPointsToStatusQueryInsteadOfClaimingDraftAction() {
         when(mcpSyncService.submit("post-a")).thenReturn(Mono.just(Map.of(
             "postName", "post-a",
             "title", "文章标题",
             "status", "PENDING",
-            "draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE,
-            "message", "已提交")));
+            "message", "同步任务已提交，正在后台执行")));
 
         McpToolResult result = execute(WechatMcpToolProvider.TOOL_SUBMIT, "post-a");
 
-        // 返回的是「本次提交将要执行的动作」本身，说明里写明 update / create 的含义
-        assertThat(result.structuredContent())
-            .containsEntry("draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE);
-        assertThat(submitFieldDescription("draftAction"))
-            .contains("update")
-            .contains("create")
-            .contains("更新")
-            .contains("新建");
-        // 关键：动作同时写进结果说明——只把动作放在结构化字段里时，只读文本的客户端会让模型自行猜测
+        assertThat(result.structuredContent()).doesNotContainKey("draftAction");
+        // 结果说明（只读文本的客户端唯一能看到的文本）把最终动作指向状态查询，而不是写死「会新建 / 会更新」
         assertThat(result.textContent())
-            .contains("draftAction=update")
-            .contains("更新草稿");
+            .contains("wechat_sync_status")
+            .contains("draftAction")
+            .doesNotContain("draftAction=");
+        assertThat(submitFieldDescription("message")).contains("wechat_sync_status");
     }
 
     @Test
     void declaresOutputSchemaMatchingStatusResultFields() {
         assertThat(requiredKeys(WechatMcpToolProvider.TOOL_STATUS))
-            .containsExactlyInAnyOrder("postName", "status", "message", "time");
+            .containsExactlyInAnyOrder("postName", "status", "message", "time", "draftAction");
+    }
+
+    @Test
+    void statusSummaryStatesActualDraftAction() {
+        // 实际动作（新建 / 更新）写进结果说明：只读文本摘要的客户端也能如实回答
+        // （状态说明本身不写动作——它同时展示在文章列表的状态列）
+        when(mcpSyncService.status("post-a")).thenReturn(Mono.just(Map.of(
+            "postName", "post-a",
+            "status", "SUCCESS",
+            "message", "已同步到公众号草稿箱",
+            "time", "2026-10-09T00:00:00Z",
+            "draftAction", WechatMcpSyncService.DRAFT_ACTION_UPDATE)));
+
+        McpToolResult result = execute(WechatMcpToolProvider.TOOL_STATUS, "post-a");
+
+        assertThat(result.textContent())
+            .contains("本次更新既有草稿")
+            .contains("draftAction");
+    }
+
+    @Test
+    void statusToolTellsModelToAnswerByDraftActionField() {
+        // 光有字段值不够：模型要照字段回答，必须在工具描述里直接下指令
+        // （描述是它拿到工具列表时唯一读到的说明，字段说明与结果文本则是调用后才看到）
+        assertThat(toolByName(WechatMcpToolProvider.TOOL_STATUS).description())
+            .contains("draftAction")
+            .contains("update")
+            .contains("create")
+            .contains("不要自行推断")
+            .contains("明说本次是新建还是更新");
+        // 字段说明里同样写清两种取值各自的后果（草稿箱里有没有多出一份）与「不要沿用提交时的预计」
+        assertThat(fieldDescription(WechatMcpToolProvider.TOOL_STATUS, "draftAction"))
+            .contains("update")
+            .contains("create")
+            .contains("不要自行推断");
     }
 
     @Test
@@ -138,7 +169,8 @@ class WechatMcpToolProviderTest {
             "postName", "post-a",
             "status", "NONE",
             "message", "该文章尚未同步过",
-            "time", "")));
+            "time", "",
+            "draftAction", "")));
 
         McpToolResult result = execute(WechatMcpToolProvider.TOOL_STATUS, "post-a");
 
@@ -254,15 +286,14 @@ class WechatMcpToolProviderTest {
             "postName", "post-a",
             "title", "文章标题",
             "status", "PENDING",
-            "draftAction", WechatMcpSyncService.DRAFT_ACTION_CREATE,
-            "message", "已提交")));
+            "message", "同步任务已提交，正在后台执行")));
 
         McpToolResult result = execute(WechatMcpToolProvider.TOOL_SUBMIT, "post-a");
 
         assertThat(result.error()).isFalse();
         assertThat(result.structuredContent()).containsEntry("status", "PENDING");
-        // 新建动作同样写进结果说明（模型无需从结构化字段里推断）
-        assertThat(result.textContent()).contains("draftAction=create").contains("新建草稿");
+        // 提交只确认「已提交、后台执行中」，不声称动作：最终结果按 wechat_sync_status 的 draftAction 说
+        assertThat(result.textContent()).contains("已提交").contains("wechat_sync_status");
         verify(mcpSyncService).submit("post-a");
     }
 

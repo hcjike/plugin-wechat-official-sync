@@ -232,6 +232,12 @@ public final class WechatContentBeautifier {
     private static final String TASK_LIST_STYLE = "margin:0.9em 0;padding-left:0;list-style:none;";
 
     /**
+     * 列表项「行内内容包裹段落」的样式：只写 {@code margin:0}——间距沿用列表项自身的样式，包裹前后
+     * 观感一致；其余排版交由段落通用样式注入补齐（默认样式在前、本声明在后，故 {@code margin:0} 生效）。
+     */
+    private static final String LIST_ITEM_WRAPPER_P_STYLE = "margin:0;";
+
+    /**
      * 正文中以<b>纯文本</b>残留的 markdown 任务清单行首标记：行首的 {@code - [ ] 事项} /
      * {@code - [x] 事项}（兼容 {@code *}/{@code +} 项目符号与 {@code [X]} 大写勾选）。缩进仅匹配
      * 空格/制表符（不吃换行，避免多行文本跨行误匹配）；{@code ]} 后允许行尾（无内容的空任务项）。
@@ -354,6 +360,11 @@ public final class WechatContentBeautifier {
         buildTaskLists(body, cfg);
         // 正文中以纯文本残留的 markdown 任务清单（- [ ] 事项 / - [x] 事项）替换为图标呈现
         convertTaskListText(body);
+        // 列表项里「行内元素 + 紧跟的裸文本」（如 markdown 列表的 <li><code>x</code>：说明</li>）补一层
+        // <p> 包裹：微信端会把直接挂在 <li> 下的裸文本提升成自己的块（<section><span leaf>…</span></section>），
+        // 发布后表现为这段文字被拆到下一行；包进段落（与 Halo 原生列表结构一致）后微信不再提升、保持同行。
+        // 须在任务列表重建之后：任务项的行首图标已就位，整项行内内容不再需要包裹
+        wrapListItemInlineContent(body);
         // 表格结构归一化须在包裹与样式注入前：colgroup 列宽归一化为百分比转写到首行单元格（「保持
         // 比例」另给表格补 min-width 托底原始总宽），随后删除 colgroup（微信编辑器不识别它，草稿在
         // 编辑器里二次编辑重建时容易被误解析出多余的空行/空框）、压紧结构空白
@@ -998,6 +1009,99 @@ public final class WechatContentBeautifier {
             return 1;
         }
         return 0;
+    }
+
+    /**
+     * 给「行内内容裸露在列表项下」的 {@code <li>} 补一层段落包裹（见 {@link #beautify} 流程中的调用说明）。
+     *
+     * <p>微信端（编辑器/发布）会把直接挂在 {@code <li>} 下的裸文本提升成它自己的块
+     * （{@code <section><span leaf="">…</span></section>}）：列表项里同时有行内元素与文本时
+     * （如 markdown 列表的 {@code <li><code>SERVER_PORT=3022</code>：说明</li>}），这段文字就被拆到
+     * 下一行——预览与草稿都正常，只有发布后才可见。把这类行内内容整体包进 {@code <p>}
+     * （{@link #LIST_ITEM_WRAPPER_P_STYLE}，与 Halo 原生列表的 {@code <li><p>…</p></li>} 结构一致）后，
+     * 文本不再是 {@code <li>} 的直接子节点，微信不再提升、代码与文字保持同行。</p>
+     *
+     * <p>仅处理「行内元素 + 文本混排」的列表项：整项只有一段纯文本（微信提升后观感不变）或只有行内
+     * 元素时保持原结构；任务列表（{@link #buildTaskLists} 已精确重建样式）不参与。</p>
+     */
+    private static void wrapListItemInlineContent(Element body) {
+        int wrapped = 0;
+        for (Element item : body.select("li")) {
+            if (isInsideTaskList(item)) {
+                continue;
+            }
+            if (wrapInlineRuns(item)) {
+                wrapped++;
+            }
+        }
+        if (wrapped > 0) {
+            log.info("正文美化：为 {} 个列表项的行内内容补了段落包裹（微信会把 li 下的裸文本提升成独立块）", wrapped);
+        }
+    }
+
+    /**
+     * 把列表项里裸露的行内内容包进 {@code <p>}（确实包裹了才返回 {@code true}）：行内内容按块级子元素
+     * 分段，每段整体包成一个段落。整项只有一段「纯文本」或「纯行内元素」时原样保留——微信把它们提升为
+     * 块后观感不变，不动结构更简单。
+     */
+    private static boolean wrapInlineRuns(Element item) {
+        List<List<Node>> runs = inlineRuns(item);
+        boolean mixed = runs.size() > 1 || (runs.size() == 1 && mixesTextAndElement(runs.get(0)));
+        if (!mixed) {
+            return false;
+        }
+        for (List<Node> run : runs) {
+            Element paragraph = new Element(Tag.valueOf("p"), "");
+            paragraph.attr("style", LIST_ITEM_WRAPPER_P_STYLE);
+            // 先就位再搬运子节点：段落落到该段行内内容原来的位置
+            run.get(0).before(paragraph);
+            for (Node node : run) {
+                paragraph.appendChild(node);
+            }
+        }
+        return true;
+    }
+
+    /** 按块级子元素把列表项的子节点切分为若干「行内段」（连续的文本节点与行内元素）。 */
+    private static List<List<Node>> inlineRuns(Element item) {
+        List<List<Node>> runs = new ArrayList<>();
+        List<Node> current = new ArrayList<>();
+        for (Node child : item.childNodes()) {
+            if (isInlineContent(child)) {
+                current.add(child);
+                continue;
+            }
+            if (!current.isEmpty()) {
+                runs.add(current);
+                current = new ArrayList<>();
+            }
+        }
+        if (!current.isEmpty()) {
+            runs.add(current);
+        }
+        return runs;
+    }
+
+    /** 是否为行内内容：文本节点，或非块级元素（{@code <code>}/{@code <span>}/{@code <a>} 等）。 */
+    private static boolean isInlineContent(Node node) {
+        if (node instanceof TextNode) {
+            return true;
+        }
+        return node instanceof Element element && !element.tag().isBlock();
+    }
+
+    /** 一段行内内容里是否同时有「可见文本」与「行内元素」——微信会把这层文本提升为独立块。 */
+    private static boolean mixesTextAndElement(List<Node> run) {
+        boolean text = false;
+        boolean element = false;
+        for (Node node : run) {
+            if (node instanceof TextNode textNode && !hasNoVisibleText(textNode.getWholeText())) {
+                text = true;
+            } else if (node instanceof Element) {
+                element = true;
+            }
+        }
+        return text && element;
     }
 
     /**

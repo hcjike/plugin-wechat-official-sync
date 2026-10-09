@@ -1483,6 +1483,48 @@ class WechatContentBeautifierTest {
     }
 
     @Test
+    void listItemWithInlineCodeFollowedByTextIsWrappedIntoParagraph() {
+        // markdown 列表渲染出的 <li><code>x</code>：说明</li>：微信端会把直接挂在 li 下的裸文本提升成
+        // 自己的块（<section><span leaf="">…</span></section>），发布后这段文字被拆到下一行；补一层段落
+        // 包裹（与 Halo 原生列表结构一致）后文字不再是 li 的直接子节点，代码与文字保持同行
+        String html = "<ul><li><code>SERVER_PORT=3022</code>：指定面板 Web 服务的监听端口</li></ul>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        // 行内内容整体包进段落：段落在 li 内、行内代码与文字同处一段
+        assertThat(result).contains("<li style=\"margin:0.35em 0;line-height:1.75;font-size:16px;color:#3f3f3f;\">"
+            + "<p style=");
+        assertThat(result).contains("margin:0;\"><code");
+        assertThat(result).contains("</code>：指定面板 Web 服务的监听端口</p></li>");
+    }
+
+    @Test
+    void listItemWithMixedInlineContentKeepsSameParagraphAcrossRuns() {
+        // 行内元素与文字混排的多种写法（文字在前 / 多个行内元素）同样补段落包裹，内容顺序不变
+        String html = "<ul><li>前缀<code>x</code>后缀</li>"
+            + "<li><strong>粗体</strong>与<a href=\"https://x\">链接</a>混排</li></ul>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).contains(">前缀<code");
+        assertThat(result).contains("</code>后缀</p></li>");
+        assertThat(result).contains("粗体</strong>与<a");
+        assertThat(result).contains("链接</a>混排</p></li>");
+    }
+
+    @Test
+    void listItemWithoutMixedInlineContentKeepsOriginalStructure() {
+        // 整项只有一段纯文本、或只有行内元素时微信提升为块后观感不变，保持原结构（不补段落包裹）
+        String html = "<ul><li>普通项一</li><li><code>only-code</code></li></ul>";
+
+        String result = WechatContentBeautifier.beautify(html, null);
+
+        assertThat(result).doesNotContain("<p");
+        assertThat(result).contains(">普通项一</li>");
+        assertThat(result).contains("only-code</code></li>");
+    }
+
+    @Test
     void markdownListStructuralWhitespaceIsRemoved() {
         // 「Markdown 编辑块」渲染出的列表在项与项之间带换行/缩进（marked 输出）：浏览器预览会折叠这层
         // 空白，但微信编辑器重建列表结构时会把它当成列表项内容 → 列表前后多出空的 <li> 行（仅提交后可见）

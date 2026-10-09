@@ -32,10 +32,12 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.io.buffer.DataBuffer;
 import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.MediaType;
 import org.springframework.http.client.reactive.ReactorClientHttpConnector;
 import org.springframework.stereotype.Component;
+import org.springframework.web.reactive.function.client.ClientResponse;
 import org.springframework.web.reactive.function.client.WebClient;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -92,6 +94,18 @@ public class WechatMpClient {
 
     /** 微信错误响应中的 {@code errcode}（响应可能被截断，故用正则取值而不是整体反序列化）。 */
     private static final Pattern ERRCODE_PATTERN = Pattern.compile("\"errcode\"\\s*:\\s*(-?\\d+)");
+
+    /**
+     * 非 2xx 响应体写进失败原因时保留的最大字符数：这类响应体要么是网关的一行错误说明、
+     * 要么是 {@code <html>} 错误页，留个开头足够定位问题，不必把整页 HTML 塞进任务记录。
+     */
+    private static final int HTTP_ERROR_BODY_CHARS = 200;
+
+    /**
+     * 腾讯云 WAF 拦截页的特征串：据此把「被 WAF 内容风控拦截」与「代理 / 网关故障」区分开
+     * （见 {@link #wafHint(String)}）。
+     */
+    private static final String WAF_BLOCK_MARKER = "waf.tencent.com";
 
     /** 下载连接超时。 */
     private static final Duration DOWNLOAD_CONNECT_TIMEOUT = Duration.ofSeconds(10);
@@ -205,6 +219,67 @@ public class WechatMpClient {
     }
 
     /**
+     * 非 2xx 响应的统一异常：带上「状态行 + 出错接口 + 响应体摘要」，供各接口调用链在
+     * {@code onStatus} 里使用。
+     *
+     * <p>微信的业务错误一律是 {@code HTTP 200 + errcode}（如 {@code 40007}、{@code 45009}），
+     * 因此能走到非 2xx 的都是<b>网关 / 代理层</b>的拒绝——例如
+     * {@code 501 Not Implemented}（接口未实现，多为微信侧或代理层临时/配置问题）、
+     * {@code 412 Precondition Failed}（缺少 {@code Content-Length} 的分块请求）、{@code 502 Bad Gateway}。
+     * 这类响应<b>没有 errcode 可依据</b>，响应体（网关的错误说明 / HTML 错误页）往往是唯一线索；
+     * 而 Spring 默认的 {@code WebClientResponseException} 只保留「状态行 + 方法 + URL」，
+     * 排查时只能靠猜。故这里主动读回响应体（单行化 + 截断）写进异常 message——
+     * 它会被持久化为同步任务的失败原因（文章列表悬停展示、MCP 工具返回）。</p>
+     *
+     * <p>只带接口路径、不带查询串：失败原因里不会出现 {@code access_token}。响应体读取失败
+     * （如超出内存上限）不掩盖状态码本身，退化为「无响应体」。</p>
+     */
+    private static Mono<WechatApiException> nonSuccessResponse(ClientResponse response) {
+        int code = response.statusCode().value();
+        String endpoint = response.request().getURI().getPath();
+        return response.bodyToMono(String.class)
+            .onErrorResume(e -> Mono.just(""))
+            .defaultIfEmpty("")
+            .map(body -> new WechatApiException(
+                "微信接口返回 HTTP " + code + " " + reasonPhrase(code) + "（POST " + endpoint + "）"
+                    + wafHint(body) + bodySummary(body), null, code));
+    }
+
+    /** HTTP 状态码的英文原因短语（未知状态码留空）。 */
+    private static String reasonPhrase(int code) {
+        HttpStatus status = HttpStatus.resolve(code);
+        return status == null ? "" : status.getReasonPhrase();
+    }
+
+    /** 把响应体压成单行摘要（超长截断）；响应体为空时返回空串。 */
+    private static String bodySummary(String body) {
+        if (body == null || body.isBlank()) {
+            return "";
+        }
+        String single = body.strip().replaceAll("\\s+", " ");
+        return "：" + (single.length() <= HTTP_ERROR_BODY_CHARS
+            ? single : single.substring(0, HTTP_ERROR_BODY_CHARS) + "…");
+    }
+
+    /**
+     * 命中腾讯云 WAF 拦截页时给出的排查提示（拦截页 HTML 里带 {@value #WAF_BLOCK_MARKER}）。
+     *
+     * <p>微信接口的 501 拦截页是腾讯云 WAF 按<b>请求内容</b>风控拦下的结果——请求根本没到微信接口，
+     * 因此既没有 {@code errcode} 也没有 rid。微信开放社区有同类记录：请求体里出现 {@code ORDER BY 1}、
+     * {@code DBMS_PIPE.RECEIVE_MESSAGE()} 等注入特征串就会触发。命中的是正文/标题里的某个特征串，
+     * 插件侧改不了，只能在失败原因里点明性质并给出可操作建议（稍后重试，或关闭「重复同步更新草稿」
+     * 改用新建草稿——{@code draft/add} 与 {@code draft/update} 的风控规则强度可能不同，实测出现过
+     * 前者放行、后者被拦的情况）。</p>
+     */
+    private static String wafHint(String body) {
+        if (body == null || !body.toLowerCase(Locale.ROOT).contains(WAF_BLOCK_MARKER)) {
+            return "";
+        }
+        return "；请求被腾讯云 WAF 按内容风控拦截（未到达微信接口，故无 errcode）：多为正文/标题里的特征串命中规则，"
+            + "可稍后重试；持续出现时建议关闭「重复同步更新草稿」改用新建草稿";
+    }
+
+    /**
      * 获取（并缓存）公众号全局 access_token。
      *
      * @param apiBase    已规范化的微信接口基址
@@ -224,6 +299,7 @@ public class WechatMpClient {
             .uri(apiBase + "/cgi-bin/token?grant_type=client_credential&appid={appid}&secret={secret}",
                 appId, appSecret)
             .retrieve()
+            .onStatus(status -> !status.is2xxSuccessful(), WechatMpClient::nonSuccessResponse)
             .bodyToMono(String.class)
             .defaultIfEmpty("")
             .map(this::parseMap)
@@ -494,6 +570,7 @@ public class WechatMpClient {
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(Map.of("articles", List.of(article)))
             .retrieve()
+            .onStatus(status -> !status.is2xxSuccessful(), WechatMpClient::nonSuccessResponse)
             .bodyToMono(String.class)
             .defaultIfEmpty("")
             .map(this::parseMap)
@@ -528,6 +605,7 @@ public class WechatMpClient {
             .contentType(MediaType.APPLICATION_JSON)
             .bodyValue(Map.of("media_id", mediaId, "index", 0, "articles", article))
             .retrieve()
+            .onStatus(status -> !status.is2xxSuccessful(), WechatMpClient::nonSuccessResponse)
             .bodyToMono(String.class)
             .defaultIfEmpty("")
             .map(this::parseMap)
@@ -572,6 +650,7 @@ public class WechatMpClient {
                 })
                 .bodyValue(body)
                 .retrieve()
+                .onStatus(status -> !status.is2xxSuccessful(), WechatMpClient::nonSuccessResponse)
                 .bodyToMono(String.class)
                 .defaultIfEmpty("")
                 .map(this::parseMap))

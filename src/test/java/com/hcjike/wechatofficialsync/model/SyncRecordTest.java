@@ -36,4 +36,17 @@ class SyncRecordTest {
         assertThat(record.getStatus()).isEqualTo(SyncRecord.STATUS_SUCCESS);
         assertThat(record.getMediaId()).isEqualTo("MEDIA-ID-1");
     }
+
+    @Test
+    void successMessageOmitsDraftActionWhichIsKeptAsField() {
+        // 状态说明展示在文章列表的状态列：那里只需要「成功了」，不必提「新建 / 更新」；
+        // 动作单独落在 draftAction 字段上，由 MCP 状态工具按需回报
+        SyncRecord created = SyncRecord.success("MEDIA-1", SyncRecord.DRAFT_ACTION_CREATE);
+        SyncRecord updated = SyncRecord.success("MEDIA-1", SyncRecord.DRAFT_ACTION_UPDATE);
+
+        assertThat(created.getMessage()).isEqualTo("已同步到公众号草稿箱");
+        assertThat(updated.getMessage()).isEqualTo("已同步到公众号草稿箱");
+        assertThat(created.getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_CREATE);
+        assertThat(updated.getDraftAction()).isEqualTo(SyncRecord.DRAFT_ACTION_UPDATE);
+    }
 }

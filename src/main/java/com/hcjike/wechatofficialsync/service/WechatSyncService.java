@@ -5,6 +5,7 @@ import com.hcjike.wechatofficialsync.client.WechatMpClient;
 import com.hcjike.wechatofficialsync.config.BeautifySetting;
 import com.hcjike.wechatofficialsync.config.WechatSetting;
 import com.hcjike.wechatofficialsync.content.WechatContentBeautifier;
+import com.hcjike.wechatofficialsync.model.SyncRecord;
 import com.hcjike.wechatofficialsync.model.SyncRequest;
 import com.hcjike.wechatofficialsync.ssrf.SsrfPolicy;
 import com.hcjike.wechatofficialsync.util.SensitiveText;
@@ -98,12 +99,13 @@ public class WechatSyncService {
      * @param setting  公众号凭据与基本配置
      * @param beautify 正文美化配置（独立设置分组，缺省时用内置默认值）
      */
-    public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify) {
+    public Mono<DraftResult> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify) {
         return submit(request, setting, beautify, null);
     }
 
     /**
-     * 执行一次完整的同步流程，成功后返回草稿 media_id。
+     * 执行一次完整的同步流程，成功后返回草稿 media_id 与本次<b>实际</b>执行的动作
+     * （{@link DraftResult}：新建 / 更新）。
      *
      * <p><b>重复同步</b>：{@code draftMediaId} 非空（该文章上次成功同步写入的草稿）<b>且插件设置里
      * 开启了「重复同步更新草稿」</b>（{@link WechatSetting#isUpdateExistingDraft()}，默认开启）时，
@@ -116,7 +118,7 @@ public class WechatSyncService {
      * @param beautify      正文美化配置（独立设置分组，缺省时用内置默认值）
      * @param draftMediaId  上次成功同步写入的草稿 media_id；为空表示首次同步（直接新建草稿）
      */
-    public Mono<String> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify,
+    public Mono<DraftResult> submit(SyncRequest request, WechatSetting setting, BeautifySetting beautify,
         String draftMediaId) {
         // 微信接口基址：留空直连官方，或指向用户自建的反向代理（用固定公网 IP 过微信白名单）
         String apiBase = WechatMpClient.resolveApiBase(setting.getBaseUrl());
@@ -598,7 +600,7 @@ public class WechatSyncService {
      *
      * <p>包内可见是为了让测试直接覆盖「封面 → 草稿」这段链路（不必绕开整个提交入口）。</p>
      */
-    Mono<String> createDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
+    Mono<DraftResult> createDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
         BeautifySetting beautify, String sourceUrl, String baseUrl, String draftMediaId) {
         return uploadCover(apiBase, setting.getAppId(), token, request.getCover(), baseUrl, false)
             .doOnNext(thumbMediaId -> log.info("文章《{}》封面素材已就绪，thumb_media_id={}",
@@ -621,10 +623,19 @@ public class WechatSyncService {
      *
      * <p><b>更新被 {@code 40007} 拒绝同样回退到新建</b>：该错误码既可能来自草稿本身已被删除，也可能来自
      * 草稿引用的封面素材已失效，因此统一改走「新建草稿」路径——封面素材若已失效，新建路径还会再触发
-     * 一次封面重传（见 {@link #retryWithFreshCover}）。其余错误照原样抛出，不做无谓重试。</p>
+     * 一次封面重传（见 {@link #retryWithFreshCover}）。</p>
+     *
+     * <p><b>更新被网关 / 代理层拒绝（非 2xx，如腾讯云 WAF 内容风控返回的 {@code 501}）也回退到新建</b>：
+     * 这类响应没有 errcode，但可以确定请求<b>没有到达微信业务层、更新没有生效</b>，改走新建比整次同步
+     * 失败更符合用户预期——实测存在「{@code draft/add} 放行、{@code draft/update} 被拦」的组合，此时
+     * 若直接报错，用户只能关掉「重复同步更新草稿」开关绕开。代价是那份旧草稿会留在草稿箱里，因此
+     * 记录里的实际动作会如实写成「新建」。</p>
+     *
+     * <p>其余错误（如频控 {@code 45011}）照原样抛出，不做无谓重试。</p>
      */
-    private Mono<String> saveDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
-        String sourceUrl, String thumbMediaId, String content, String baseUrl, String draftMediaId) {
+    private Mono<DraftResult> saveDraft(String apiBase, WechatSetting setting, String token,
+        SyncRequest request, String sourceUrl, String thumbMediaId, String content, String baseUrl,
+        String draftMediaId) {
         if (isBlank(draftMediaId)) {
             log.info("文章《{}》首次同步（没有已知草稿），直接新建草稿", request.getTitle());
             return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl, thumbMediaId,
@@ -653,7 +664,9 @@ public class WechatSyncService {
                 }
                 return updateDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId, content,
                         draftMediaId)
-                    .onErrorResume(WechatSyncService::isInvalidMediaId, error -> {
+                    // 「草稿 / 封面素材已失效」（40007）与「网关 / WAF 拒绝（无 errcode 的非 2xx）」都改走
+                    // 新建：前者说明这份草稿已不可用，后者说明请求没到微信业务层、更新确定没有生效
+                    .onErrorResume(error -> isInvalidMediaId(error) || isGatewayRejected(error), error -> {
                         log.warn("文章《{}》更新草稿 [{}] 被拒（{}）：改为新建草稿", request.getTitle(),
                             draftMediaId, error.getMessage());
                         return addDraftWithCoverRetry(apiBase, setting, token, request, sourceUrl,
@@ -663,13 +676,15 @@ public class WechatSyncService {
     }
 
     /**
-     * 新建草稿，并在被 {@code 40007} 拒绝（封面素材已失效）时重传一次封面再建一次。
+     * 新建草稿，并在被 {@code 40007} 拒绝（封面素材已失效）时重传一次封面再建一次；
+     * 返回草稿 media_id 与动作 {@link SyncRecord#DRAFT_ACTION_CREATE}。
      */
-    private Mono<String> addDraftWithCoverRetry(String apiBase, WechatSetting setting, String token,
+    private Mono<DraftResult> addDraftWithCoverRetry(String apiBase, WechatSetting setting, String token,
         SyncRequest request, String sourceUrl, String thumbMediaId, String content, String baseUrl) {
         return addDraft(apiBase, setting, token, request, sourceUrl, thumbMediaId, content)
             .onErrorResume(WechatSyncService::isInvalidMediaId,
-                e -> retryWithFreshCover(apiBase, setting, token, request, baseUrl, sourceUrl, content, e));
+                e -> retryWithFreshCover(apiBase, setting, token, request, baseUrl, sourceUrl, content, e))
+            .map(mediaId -> DraftResult.created(mediaId));
     }
 
     /** 提交草稿：把已就绪的封面与正文组装成文章（失败时的错误带微信错误码，见 {@link WechatApiException}）。 */
@@ -679,12 +694,16 @@ public class WechatSyncService {
             buildArticle(request, setting, thumbMediaId, content, sourceUrl));
     }
 
-    /** 更新既有草稿（{@code draft/update}）：成功时返回的仍是原来那个草稿 media_id。 */
-    private Mono<String> updateDraft(String apiBase, WechatSetting setting, String token, SyncRequest request,
-        String sourceUrl, String thumbMediaId, String content, String draftMediaId) {
+    /**
+     * 更新既有草稿（{@code draft/update}）：成功时草稿 media_id 不变，
+     * 返回它并标注动作 {@link SyncRecord#DRAFT_ACTION_UPDATE}。
+     */
+    private Mono<DraftResult> updateDraft(String apiBase, WechatSetting setting, String token,
+        SyncRequest request, String sourceUrl, String thumbMediaId, String content, String draftMediaId) {
         return wechatMpClient.updateDraft(apiBase, token, draftMediaId,
                 buildArticle(request, setting, thumbMediaId, content, sourceUrl))
-            .doOnNext(mediaId -> log.info("文章《{}》已更新既有草稿，media_id={}", request.getTitle(), mediaId));
+            .doOnNext(mediaId -> log.info("文章《{}》已更新既有草稿，media_id={}", request.getTitle(), mediaId))
+            .map(mediaId -> DraftResult.updated(mediaId));
     }
 
     /**
@@ -706,6 +725,31 @@ public class WechatSyncService {
     /** 是否为「封面素材已失效」（草稿被 {@code 40007 invalid media_id} 拒绝）。 */
     private static boolean isInvalidMediaId(Throwable error) {
         return error instanceof WechatApiException api && api.isInvalidMediaId();
+    }
+
+    /** 是否为「网关 / 代理层拒绝」（如 WAF 内容风控的 {@code 501}）：请求没到微信业务层，调用未生效。 */
+    private static boolean isGatewayRejected(Throwable error) {
+        return error instanceof WechatApiException api && api.isGatewayRejected();
+    }
+
+    /**
+     * 一次草稿写入的结果：草稿 media_id + 本次<b>实际</b>执行的动作。
+     *
+     * <p>动作取值见 {@link SyncRecord#DRAFT_ACTION_CREATE} / {@link SyncRecord#DRAFT_ACTION_UPDATE}。
+     * 之所以要连动作一起返回：执行阶段可能发生回退（更新被网关 / WAF 拒绝或草稿已失效时改为新建），
+     * 调用方（任务记录、MCP 工具）必须据此如实回报「新建」还是「更新」，不能沿用提交时的预判。</p>
+     */
+    public record DraftResult(String mediaId, String draftAction) {
+
+        /** 本次新建了一份草稿。 */
+        static DraftResult created(String mediaId) {
+            return new DraftResult(mediaId, SyncRecord.DRAFT_ACTION_CREATE);
+        }
+
+        /** 本次更新了既有草稿（media_id 不变）。 */
+        static DraftResult updated(String mediaId) {
+            return new DraftResult(mediaId, SyncRecord.DRAFT_ACTION_UPDATE);
+        }
     }
 
     /**
